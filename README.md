@@ -1,6 +1,6 @@
 # deepseek-vision
 
-deepseek-vision 把 deepseek 接入 Codex：让 Codex 这类文本模型也能“看图、听音、看视频”。使用时，图片、音频、视频会交给小米的 MiMo V2.5 大模型处理，Codex 再把结果带回来回答你，并显示本次用了多少 Token 或花了多少钱。
+deepseek-vision 是一个能让 deepseek 在 Codex 里查看图片的 skill。平时 deepseek 只能看懂文字，你发的图片、音频、视频它都看不见、听不到。装上这个 skill 后，deepseek 会先把文件转交给小米的 MiMo V2.5 大模型，请它帮忙“看”和“听”，再把看懂的内容用中文告诉你。你只需要像平时一样把文件发给它、问问题，不需要任何特殊操作；每次使用后它还会告诉你这次消耗了多少 Token 或花了多少钱。
 
 ## 它能做什么
 
