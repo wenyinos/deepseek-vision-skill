@@ -7,10 +7,13 @@ import getpass
 import json
 import os
 import shutil
+import signal
+import socket
 import ssl
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,6 +40,27 @@ BASE64_LIMIT = 50 * 1024 * 1024
 PAYG_LABEL = "按量付费"
 TOKEN_LABEL = "Token Plan"
 _SSL_CONTEXT = None
+REQUEST_TIMEOUT = 60
+
+
+class _RequestTimeout(Exception):
+    pass
+
+
+def _request_timeout_call(seconds, func):
+    if hasattr(signal, "SIGALRM"):
+        def _handler(_signum, _frame):
+            raise _RequestTimeout()
+
+        previous = signal.signal(signal.SIGALRM, _handler)
+        signal.alarm(seconds)
+        try:
+            return func()
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+    socket.setdefaulttimeout(seconds)
+    return func()
 
 EXT_MIME = {
     "png": "image/png",
@@ -100,6 +124,18 @@ def _credentials_path():
 
 def _lock_path():
     return _config_dir() / ".credentials.lock"
+
+
+def _jobs_dir():
+    return _config_dir() / "jobs"
+
+
+def _worker_log_path():
+    return _config_dir() / "worker.log"
+
+
+def _job_path(job_id):
+    return _jobs_dir() / f"{job_id}.json"
 
 
 def _use_file_backend():
@@ -302,6 +338,91 @@ def _config_lock():
             yield
 
 
+def _write_job_file(job):
+    path = _job_path(job["id"])
+    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _read_job(job_id):
+    path = _job_path(job_id)
+    if not path.exists():
+        raise MiMoError(f"任务不存在：{job_id}", code="job_not_found")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _claim_next_job():
+    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    for path in sorted(_jobs_dir().glob("*.json")):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if job.get("status") == "pending":
+            job["status"] = "running"
+            _write_job_file(job)
+            return job
+    return None
+
+
+def _spawn_worker():
+    script = Path(__file__).resolve()
+    _config_dir().mkdir(parents=True, exist_ok=True)
+    with open(_worker_log_path(), "ab") as log:
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": log,
+            "stderr": subprocess.STDOUT,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, str(script), "worker"], **kwargs)
+
+
+def _job_command(job):
+    script = Path(__file__).resolve()
+    if job.get("command") == "analyze":
+        cmd = [
+            sys.executable,
+            str(script),
+            "analyze",
+            "--max-tokens",
+            str(job.get("max_tokens", 1024)),
+            "--fps",
+            str(job.get("fps", 2.0)),
+            "--resolution",
+            str(job.get("resolution", "default")),
+        ]
+        for file_path in job.get("files", []):
+            cmd += ["--files", file_path]
+        for url in job.get("urls", []):
+            cmd += ["--urls", url]
+        if job.get("kind"):
+            cmd += ["--kind", job["kind"]]
+        cmd += ["--prompt", job.get("prompt") or "请基于附件内容直接、简洁地回答。"]
+        return cmd
+    cmd = [
+        sys.executable,
+        str(script),
+        "asr",
+        "--file",
+        str(job.get("file", "")),
+        "--language",
+        str(job.get("language", "auto")),
+        "--max-tokens",
+        str(job.get("max_tokens", 2048)),
+    ]
+    return cmd
+
+
 def _load_raw_config():
     if sys.platform == "darwin" and not _use_file_backend():
         try:
@@ -351,7 +472,13 @@ def load_config():
     if not raw:
         cfg = _default_config()
     else:
-        cfg = _decode_config_raw(raw)
+        try:
+            cfg = _decode_config_raw(raw)
+        except MiMoError:
+            fallback = _read_file()
+            if not fallback:
+                raise
+            cfg = _decode_config_raw(fallback)
     return _merge_defaults(cfg)
 
 
@@ -361,15 +488,11 @@ def save_config(cfg):
         if sys.platform == "darwin" and not _use_file_backend():
             try:
                 _keychain_write(payload)
-                _remove_file()
-                return
             except MiMoError:
                 pass
         if os.name == "nt" and not _use_file_backend():
             try:
                 _dpapi_write(payload)
-                _remove_file()
-                return
             except MiMoError:
                 pass
         _write_file(payload)
@@ -429,19 +552,111 @@ def _validate_prefix(plan, key):
 
 def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key"):
     key = credentials.get("api_key", "")
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    curl = shutil.which("curl")
+    if curl:
+        cmd = [
+            curl,
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(REQUEST_TIMEOUT),
+            "--connect-timeout",
+            "15",
+            "--write-out",
+            "\n%{http_code}",
+            "-X",
+            method,
+        ]
+        if auth_header == "api-key":
+            cmd += ["-H", f"api-key: {key}"]
+        else:
+            cmd += ["-H", f"Authorization: Bearer {key}"]
+        cmd += ["-H", "Content-Type: application/json"]
+        if data is not None:
+            cmd += ["--data-binary", "@-"]
+        cmd.append(url)
+
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=data,
+                    capture_output=True,
+                    timeout=REQUEST_TIMEOUT + 5,
+                )
+            except subprocess.TimeoutExpired:
+                message = f"请求超时（超过 {REQUEST_TIMEOUT} 秒），请稍后重试或改用更小的文件"
+                last_error = MiMoError(message, code="timeout")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            output = proc.stdout.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode("utf-8", errors="replace")
+                message = (
+                    "网络错误: "
+                    + _sanitize_text(stderr or output, [key, credentials.get("base_url", "")])
+                )
+                last_error = MiMoError(message, code="network")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            body = output
+            status = 0
+            if "\n" in output:
+                body, status_raw = output.rsplit("\n", 1)
+                try:
+                    status = int(status_raw.strip())
+                except ValueError:
+                    status = 0
+
+            if status >= 400:
+                message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code=status)
+                if status in (429, 500, 502, 503, 504) and attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            try:
+                return json.loads(body), status or 200
+            except json.JSONDecodeError:
+                message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code="parse")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+        raise last_error or MiMoError("请求失败", code="unknown")
+
     headers = {"Content-Type": "application/json"}
     if auth_header == "api-key":
         headers["api-key"] = key
     else:
         headers["Authorization"] = f"Bearer {key}"
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     last_error = None
     for attempt in range(retries + 1):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=60, context=_ssl_context()) as response:
+            with _request_timeout_call(
+                REQUEST_TIMEOUT,
+                lambda: urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT, context=_ssl_context()),
+            ) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 return json.loads(body), response.status
+        except _RequestTimeout:
+            message = f"请求超时（超过 {REQUEST_TIMEOUT} 秒），请稍后重试或改用更小的文件"
+            last_error = MiMoError(message, code="timeout")
+            if attempt < retries:
+                time.sleep(1 + attempt)
+                continue
+            raise last_error
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             message = f"HTTP {exc.code}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
@@ -583,6 +798,26 @@ def _extract_content(data):
             return reasoning, True
         return "", False
     return content, False
+
+
+def _finish_reason(data):
+    choice = (data.get("choices") or [{}])[0]
+    return choice.get("finish_reason")
+
+
+def _chat_with_retry(credentials, body, max_tokens):
+    data, _ = chat_completions(credentials, body)
+    current_max = max_tokens
+    for _ in range(4):
+        content, _ = _extract_content(data)
+        if content and _finish_reason(data) != "length":
+            break
+        if current_max >= 4096:
+            break
+        current_max = min(current_max * 2, 4096)
+        body["max_completion_tokens"] = current_max
+        data, _ = chat_completions(credentials, body)
+    return data
 
 
 def _audio_duration(path):
@@ -798,6 +1033,115 @@ def cmd_check(args):
     )
 
 
+def cmd_diagnose(args):
+    cfg = load_config()
+    plan = active_plan(cfg)
+    creds = active_credentials(cfg)
+    result = {
+        "ok": True,
+        "command": "diagnose",
+        "active_plan": plan or None,
+        "config_ok": bool(creds),
+        "dns_ok": None,
+        "network_ok": None,
+    }
+    if not creds:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    host = urllib.parse.urlparse(creds.get("base_url", "")).hostname
+    if host:
+        try:
+            socket.getaddrinfo(host, 443)
+            result["dns_ok"] = True
+        except Exception as exc:
+            result["dns_ok"] = False
+            result["dns_error"] = _sanitize_text(str(exc), [creds.get("base_url", "")])
+    try:
+        models = list_models(creds)
+        model_ids = []
+        for item in models or []:
+            if isinstance(item, dict):
+                model_ids.append(str(item.get("id") or ""))
+            elif isinstance(item, str):
+                model_ids.append(item)
+        result["network_ok"] = True
+        result["models"] = sorted(set(model_ids))[:50]
+    except MiMoError as exc:
+        result["network_ok"] = False
+        result["network_error"] = str(exc)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_poll(args):
+    deadline = time.time() + args.wait
+    while True:
+        job = _read_job(args.job)
+        status = job.get("status")
+        if status in ("done", "error"):
+            result = job.get("result") or {}
+            try:
+                _job_path(args.job).unlink(missing_ok=True)
+            except OSError:
+                pass
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        if time.time() >= deadline:
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "command": "poll",
+                        "job_id": args.job,
+                        "status": status,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+        time.sleep(1)
+
+
+def cmd_worker(args):
+    while True:
+        with _config_lock():
+            job = _claim_next_job()
+        if not job:
+            break
+        job_id = job["id"]
+        try:
+            proc = subprocess.run(
+                _job_command(job),
+                capture_output=True,
+                text=True,
+                timeout=REQUEST_TIMEOUT * 4 + 30,
+            )
+            output = (proc.stdout or "").strip()
+            try:
+                result = json.loads(output)
+            except json.JSONDecodeError:
+                result = {
+                    "ok": False,
+                    "error": _sanitize_text(output or proc.stderr),
+                    "code": "worker_parse",
+                }
+            if not result.get("ok"):
+                result = {
+                    "ok": False,
+                    "error": result.get("error", "worker failed"),
+                    "code": result.get("code", "worker"),
+                }
+        except subprocess.TimeoutExpired:
+            result = {"ok": False, "error": "后台任务超时", "code": "worker_timeout"}
+        except Exception as exc:
+            result = {"ok": False, "error": _sanitize_text(str(exc)), "code": "worker"}
+        with _config_lock():
+            job["status"] = "done" if result.get("ok") else "error"
+            job["result"] = result
+            _write_job_file(job)
+
+
 def cmd_analyze(args):
     cfg = load_config()
     plan = active_plan(cfg)
@@ -837,11 +1181,41 @@ def cmd_analyze(args):
         _print_dry_run("analyze", dry_plan, dry_creds, body)
         return
 
+    if args.async_mode:
+        job = {
+            "id": uuid.uuid4().hex,
+            "status": "pending",
+            "command": "analyze",
+            "files": args.files,
+            "urls": args.urls,
+            "kind": args.kind,
+            "prompt": prompt,
+            "max_tokens": args.max_tokens,
+            "fps": args.fps,
+            "resolution": args.resolution,
+        }
+        _write_job_file(job)
+        _spawn_worker()
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "analyze",
+                    "async": True,
+                    "job_id": job["id"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
     if not creds:
         raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
 
-    data, _ = chat_completions(creds, body)
+    data = _chat_with_retry(creds, body, args.max_tokens)
     content, reasoning_fallback = _extract_content(data)
+    finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
     if not content:
         raise MiMoError("MiMo 未返回可用内容，请缩小问题或提高 --max-tokens 重试", code="empty")
@@ -854,6 +1228,7 @@ def cmd_analyze(args):
         "model": DEFAULT_MODEL,
         "plan": plan,
         "usage": usage,
+        "finish_reason": finish_reason,
         "reasoning_fallback": reasoning_fallback,
     }
     if plan == "payg":
@@ -873,6 +1248,31 @@ def cmd_asr(args):
     ext = path.suffix.lower().lstrip(".")
     if ext not in ("wav", "mp3"):
         raise MiMoError("ASR 仅支持 wav/mp3 音频", code="usage")
+
+    if args.async_mode:
+        job = {
+            "id": uuid.uuid4().hex,
+            "status": "pending",
+            "command": "asr",
+            "file": args.file,
+            "language": args.language,
+            "max_tokens": args.max_tokens,
+        }
+        _write_job_file(job)
+        _spawn_worker()
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "asr",
+                    "async": True,
+                    "job_id": job["id"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
     data_uri, _ = _data_uri(path)
     body = {
@@ -908,8 +1308,9 @@ def cmd_asr(args):
     if not creds:
         raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
 
-    data, _ = chat_completions(creds, body)
+    data = _chat_with_retry(creds, body, args.max_tokens)
     content, reasoning_fallback = _extract_content(data)
+    finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
     duration = _audio_duration(path)
     if not content:
@@ -923,6 +1324,7 @@ def cmd_asr(args):
         "model": ASR_MODEL,
         "plan": plan,
         "usage": usage,
+        "finish_reason": finish_reason,
         "duration_seconds": duration,
         "reasoning_fallback": reasoning_fallback,
     }
@@ -949,6 +1351,7 @@ def build_parser():
 
     subparsers.add_parser("status", help="Show masked configuration status")
     subparsers.add_parser("check", help="Validate current credentials against MiMo API")
+    subparsers.add_parser("diagnose", help="Check config, DNS and MiMo network connectivity")
 
     analyze = subparsers.add_parser("analyze", help="Analyze image/audio/video with mimo-v2.5")
     analyze.add_argument("--files", action="append", default=[], help="Local media file (repeatable)")
@@ -959,12 +1362,20 @@ def build_parser():
     analyze.add_argument("--fps", type=float, default=2.0)
     analyze.add_argument("--resolution", default="default")
     analyze.add_argument("--dry-run", action="store_true")
+    analyze.add_argument("--async", dest="async_mode", action="store_true")
 
     asr = subparsers.add_parser("asr", help="Transcribe audio with mimo-v2.5-asr")
     asr.add_argument("--file", required=True)
     asr.add_argument("--language", default="auto")
     asr.add_argument("--max-tokens", type=int, default=2048)
     asr.add_argument("--dry-run", action="store_true")
+    asr.add_argument("--async", dest="async_mode", action="store_true")
+
+    poll = subparsers.add_parser("poll", help="Poll an async MiMo job")
+    poll.add_argument("--job", required=True, help="Job id returned by --async")
+    poll.add_argument("--wait", type=int, default=0, help="Seconds to wait for completion")
+
+    subparsers.add_parser("worker", help="Internal background worker for async jobs")
 
     return parser
 
@@ -977,6 +1388,9 @@ def main():
         "use": cmd_use,
         "status": cmd_status,
         "check": cmd_check,
+        "diagnose": cmd_diagnose,
+        "poll": cmd_poll,
+        "worker": cmd_worker,
         "analyze": cmd_analyze,
         "asr": cmd_asr,
     }
