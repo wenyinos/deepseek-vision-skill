@@ -13,16 +13,9 @@ deepseek-vision 把 deepseek 接入 Codex：让 Codex 这类文本模型也能�
 
 ## 安装
 
-三种方式任选其一：
+把 [deepseek-vision](https://github.com/reF0o0/deepseek-vision) 这个链接发给 Codex，说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
 
-方式一：让 Codex 安装（最简单）
-把这个链接发给 Codex：[deepseek-vision](https://github.com/reF0o0/deepseek-vision)，并说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
-
-方式二：手动复制
-在 GitHub 页面下载本仓库的压缩包，解压后把里面的 deepseek-vision 文件夹复制到 Codex 的技能目录。技能目录一般在 ~/.codex/skills 下。
-
-方式三：熟悉终端的人
-用终端克隆本仓库，并把仓库里的 deepseek-vision 文件夹放到 Codex 的 skills 目录。
+也可以到 [Releases 页面](https://github.com/reF0o0/deepseek-vision/releases) 直接下载 skill 压缩包。
 
 ## 配置
 
