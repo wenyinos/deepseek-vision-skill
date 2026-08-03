@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 凭据与本地配置，不要提交
+config.json
+credentials.json
+*.env
+*.local
