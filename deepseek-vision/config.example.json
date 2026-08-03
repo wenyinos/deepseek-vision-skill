@@ -1,0 +1,22 @@
+{
+  "active_plan": "",
+  "payg": {
+    "api_key": "",
+    "base_url": "https://api.xiaomimimo.com/v1"
+  },
+  "token": {
+    "api_key": "",
+    "base_url": ""
+  },
+  "pricing": {
+    "mimo-v2.5": {
+      "input_uncached_cny_per_mtok": 1.0,
+      "input_cached_cny_per_mtok": 0.02,
+      "output_cny_per_mtok": 2.0
+    },
+    "mimo-v2.5-asr": {
+      "cny_per_audio_hour": 0.5
+    }
+  },
+  "pricing_updated": "2026-08-03"
+}

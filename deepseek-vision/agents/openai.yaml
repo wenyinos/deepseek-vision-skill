@@ -1,0 +1,7 @@
+interface:
+  display_name: "DeepSeek Vision"
+  short_description: "Offload non-text content to MiMo V2.5 with secure global config."
+  default_prompt: "Use $deepseek-vision to route this image/audio/video through MiMo V2.5."
+
+policy:
+  allow_implicit_invocation: true
