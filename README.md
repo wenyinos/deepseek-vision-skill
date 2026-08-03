@@ -1,6 +1,6 @@
 # deepseek-vision
 
-deepseek-vision 是一个给 Codex 使用的技能。它解决的问题是：Codex 这类文本模型看不到图片、听不到音频，也看不了视频。安装这个技能后，Codex 会把图片、音频、视频交给小米的 MiMo V2.5 大模型处理，再把处理结果带回来回答你，并告诉你这次用了多少 Token 或花了多少钱。
+deepseek-vision 把 deepseek 接入 Codex：让 Codex 这类文本模型也能“看图、听音、看视频”。使用时，图片、音频、视频会交给小米的 MiMo V2.5 大模型处理，Codex 再把结果带回来回答你，并显示本次用了多少 Token 或花了多少钱。
 
 ## 它能做什么
 
@@ -13,26 +13,25 @@ deepseek-vision 是一个给 Codex 使用的技能。它解决的问题是：Cod
 
 ## 安装
 
-两步即可完成：
+三种方式任选其一：
 
-1. 打开终端，把本仓库下载到电脑，并复制到 Codex 的技能目录：
+方式一：让 Codex 安装（最简单）
+把这个链接发给 Codex：[deepseek-vision](https://github.com/reF0o0/deepseek-vision)，并说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
 
-```bash
-git clone https://github.com/reF0o0/deepseek-vision.git
-cp -r deepseek-vision/deepseek-vision ~/.codex/skills/deepseek-vision
-```
+方式二：手动复制
+在 GitHub 页面下载本仓库的压缩包，解压后把里面的 deepseek-vision 文件夹复制到 Codex 的技能目录。技能目录一般在 ~/.codex/skills 下。
 
-2. 配置 MiMo 账号，二选一：
-   - 按量付费：使用小米开放平台的 API Key。
-   - Token Plan：订阅 Token Plan 后，使用专属 API Key 和专属 Base URL。
+方式三：熟悉终端的人
+用终端克隆本仓库，并把仓库里的 deepseek-vision 文件夹放到 Codex 的 skills 目录。
 
-```bash
-cd ~/.codex/skills/deepseek-vision
-python3 scripts/mimo.py configure --plan payg
-python3 scripts/mimo.py configure --plan token --base-url "https://你的专属TokenPlan地址/v1"
-```
+## 配置
 
-配置完成后，新建一个 Codex 对话，把文件发给它并说明问题即可。
+装好后，在 Codex 对话里直接输入“配置 deepseek-vision”，按提示二选一：
+
+- 按量付费：使用小米开放平台的 API Key。
+- Token Plan：订阅 Token Plan 后，使用专属 API Key 和专属 Base URL。
+
+不需要自己敲命令，Codex 会在对话里帮你完成配置。
 
 ## 怎么用
 
