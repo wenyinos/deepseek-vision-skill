@@ -26,6 +26,13 @@ deepseek-vision 是一个能让 deepseek 在 Codex 里查看图片的 skill。�
 
 不需要自己敲命令，Codex 会在对话里帮你完成配置。
 
+## 环境要求
+
+- 已安装 Codex。
+- 已安装 Python 3（脚本只用 Python 标准库，不需要安装其他依赖）。
+- 网络能正常访问小米 MiMo API。
+- 已配置自己的 MiMo API Key 或 Token Plan。
+
 ## 怎么用
 
 不需要记命令，直接在 Codex 对话里说需求：
