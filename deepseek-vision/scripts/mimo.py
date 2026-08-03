@@ -1103,6 +1103,31 @@ def cmd_poll(args):
         time.sleep(1)
 
 
+def cmd_jobs(args):
+    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for path in sorted(_jobs_dir().glob("*.json")):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        jobs.append(
+            {
+                "job_id": job.get("id"),
+                "command": job.get("command"),
+                "status": job.get("status"),
+                "created": job.get("created"),
+            }
+        )
+    print(
+        json.dumps(
+            {"ok": True, "command": "jobs", "jobs": jobs},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def cmd_worker(args):
     while True:
         with _config_lock():
@@ -1184,6 +1209,7 @@ def cmd_analyze(args):
     if args.async_mode:
         job = {
             "id": uuid.uuid4().hex,
+            "created": time.time(),
             "status": "pending",
             "command": "analyze",
             "files": args.files,
@@ -1252,6 +1278,7 @@ def cmd_asr(args):
     if args.async_mode:
         job = {
             "id": uuid.uuid4().hex,
+            "created": time.time(),
             "status": "pending",
             "command": "asr",
             "file": args.file,
@@ -1375,6 +1402,7 @@ def build_parser():
     poll.add_argument("--job", required=True, help="Job id returned by --async")
     poll.add_argument("--wait", type=int, default=0, help="Seconds to wait for completion")
 
+    subparsers.add_parser("jobs", help="List pending and completed async jobs")
     subparsers.add_parser("worker", help="Internal background worker for async jobs")
 
     return parser
@@ -1390,6 +1418,7 @@ def main():
         "check": cmd_check,
         "diagnose": cmd_diagnose,
         "poll": cmd_poll,
+        "jobs": cmd_jobs,
         "worker": cmd_worker,
         "analyze": cmd_analyze,
         "asr": cmd_asr,

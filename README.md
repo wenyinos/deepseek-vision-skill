@@ -1,6 +1,45 @@
 # deepseek-vision skill
 
-将图片、音频、视频等非文本内容转交给小米 MiMo V2.5 处理，让文本模型可以可靠地“看图、听音、看视频”，并自动统计 Token Plan 用量或按量付费费用。本副本未录入 API Key，使用前需先运行 `python3 scripts/mimo.py configure --plan payg|token` 配置。
+将图片、音频、视频等非文本内容转交给小米 MiMo V2.5 处理，让文本模型可以可靠地“看图、听音、看视频”，并自动统计 Token Plan 用量或按量付费费用。本仓库不包含任何 API Key，使用前需先配置。
+
+本仓库是 `deepseek-vision` skill 的公开分发仓库，skill 本体位于仓库内的 `deepseek-vision/` 目录。
+
+## 安装到 Codex
+
+方式一：clone 后复制到 Codex 技能目录
+
+```bash
+git clone https://github.com/reF0o0/deepseek-vision.git
+cp -r deepseek-vision/deepseek-vision ~/.codex/skills/deepseek-vision
+```
+
+方式二：直接使用仓库内的 `deepseek-vision/` 目录作为 skill 根目录，并在 Codex 中配置好 skill 路径。
+
+安装后打开或新建 Codex 对话即可使用；首次使用前配置 MiMo（以下命令在 skill 根目录执行）：
+
+```bash
+cd ~/.codex/skills/deepseek-vision
+python3 scripts/mimo.py configure --plan payg            # 按量付费
+python3 scripts/mimo.py configure --plan token --base-url "https://你的专属TokenPlan地址/v1"
+python3 scripts/mimo.py status
+```
+
+## 使用示例
+
+```bash
+# 图片/音频/视频理解
+python3 scripts/mimo.py analyze --files /path/to/file.png --prompt "描述这张图片"
+python3 scripts/mimo.py analyze --files /path/to/video.mp4 --prompt "总结视频内容" --fps 1
+python3 scripts/mimo.py analyze --urls https://example.com/a.mp3 --prompt "这段音频说了什么"
+
+# 音频转文字/听写
+python3 scripts/mimo.py asr --file /path/to/audio.mp3 --language auto
+
+# 后台任务，适合长时间识别
+python3 scripts/mimo.py analyze --files /path/to/file.png --prompt "描述这张图片" --async
+python3 scripts/mimo.py poll --job <job_id> --wait 30
+python3 scripts/mimo.py jobs
+```
 
 ## 工作流程
 

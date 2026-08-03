@@ -75,6 +75,8 @@ python3 scripts/mimo.py poll --job <job_id> --wait 30
 
 `poll` 返回 `status: pending` 时稍等再轮询；返回 `done` 后输出与同步模式相同的 JSON，`error` 则输出明确错误。后台任务由独立进程执行，不会阻塞当前对话。
 
+如果对话中途被中断，后台任务仍会继续运行。重新打开对话后运行 `python3 scripts/mimo.py jobs` 查看任务，再用 `python3 scripts/mimo.py poll --job <job_id> --wait 30` 取回结果。
+
 脚本输出 JSON，取 `content` 字段作为 MiMo 的处理结果。信息不足时可以继续用更小的问题或更高的 `--max-tokens` 再请求一次，但不要臆测媒体内容。
 
 以上命令请在 skill 目录下运行；如果当前目录不是 skill，可先执行 `cd ~/.codex/skills/deepseek-vision`，或直接使用绝对路径 `python3 ~/.codex/skills/deepseek-vision/scripts/mimo.py`。非交互式配置可通过 `MIMO_API_KEY` 环境变量提供 key，Token Plan 再通过 `--base-url` 提供专属 Base URL。
