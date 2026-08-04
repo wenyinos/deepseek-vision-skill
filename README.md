@@ -13,9 +13,9 @@ deepseek-vision 是一个能让 deepseek 在 Codex 里查看图片的 skill。�
 
 ## 安装
 
-把 [deepseek-vision](https://github.com/reF0o0/deepseek-vision) 这个链接发给 Codex，说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
+把 [deepseek-vision](https://github.com/reF0o0/deepseek-vision-skill) 这个链接发给 Codex，说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
 
-也可以到 [Releases 页面](https://github.com/reF0o0/deepseek-vision/releases) 直接下载 skill 压缩包。
+也可以到 [Releases 页面](https://github.com/reF0o0/deepseek-vision-skill/releases) 直接下载 skill 压缩包。
 
 ## 配置
 
