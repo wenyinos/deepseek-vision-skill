@@ -12,6 +12,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import urllib.error
@@ -40,7 +41,7 @@ BASE64_LIMIT = 50 * 1024 * 1024
 PAYG_LABEL = "按量付费"
 TOKEN_LABEL = "Token Plan"
 _SSL_CONTEXT = None
-REQUEST_TIMEOUT = 60
+DEFAULT_TIMEOUT = 180
 
 
 class _RequestTimeout(Exception):
@@ -61,6 +62,16 @@ def _request_timeout_call(seconds, func):
             signal.signal(signal.SIGALRM, previous)
     socket.setdefaulttimeout(seconds)
     return func()
+
+
+def _effective_timeout(override=None):
+    value = override
+    if value is None:
+        raw = os.environ.get("MIMO_TIMEOUT", "").strip()
+        value = int(raw) if raw else DEFAULT_TIMEOUT
+    if value < 1:
+        raise MiMoError("timeout 必须大于 0", code="usage")
+    return value
 
 EXT_MIME = {
     "png": "image/png",
@@ -130,16 +141,22 @@ def _jobs_dir():
     return _config_dir() / "jobs"
 
 
-def _worker_log_path():
-    return _config_dir() / "worker.log"
-
-
 def _job_path(job_id):
     return _jobs_dir() / f"{job_id}.json"
 
 
 def _use_file_backend():
     return os.environ.get("MIMO_CREDENTIAL_BACKEND", "auto").strip().lower() == "file"
+
+
+def _secure_mkdir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+    return path
 
 
 def _sanitize_text(text, secrets=()):
@@ -194,7 +211,51 @@ def _restrict_windows_file(path):
     )
 
 
+KEYCHAIN_SERVICE = "deepseek-vision"
+KEYCHAIN_CHUNK_PREFIX = "deepseek-vision.chunk."
+KEYCHAIN_CHUNK_SIZE = 100
+MAX_KEYCHAIN_CHUNKS = 100
+
+
+def _keychain_delete(account):
+    subprocess.run(
+        [
+            "security",
+            "delete-generic-password",
+            "-a",
+            account,
+            "-s",
+            KEYCHAIN_SERVICE,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
 def _keychain_read():
+    chunks = []
+    for index in range(MAX_KEYCHAIN_CHUNKS):
+        proc = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                f"{KEYCHAIN_CHUNK_PREFIX}{index}",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            break
+        value = proc.stdout.strip()
+        if not value:
+            break
+        chunks.append(value)
+    if chunks:
+        return "".join(chunks)
     proc = subprocess.run(
         [
             "security",
@@ -202,7 +263,7 @@ def _keychain_read():
             "-a",
             "default",
             "-s",
-            "deepseek-vision",
+            KEYCHAIN_SERVICE,
             "-w",
         ],
         capture_output=True,
@@ -215,26 +276,35 @@ def _keychain_read():
 
 
 def _keychain_write(payload):
-    proc = subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            "default",
-            "-s",
-            "deepseek-vision",
-            "-w",
-            payload,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise MiMoError(
-            f"无法写入 macOS Keychain: {_sanitize_text(proc.stderr.strip())}",
-            code="keychain",
+    try:
+        compact = json.dumps(json.loads(payload), ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError):
+        compact = " ".join(payload.split())
+    chunks = [compact[index:index + KEYCHAIN_CHUNK_SIZE] for index in range(0, len(compact), KEYCHAIN_CHUNK_SIZE)]
+    _keychain_delete("default")
+    for index in range(MAX_KEYCHAIN_CHUNKS):
+        _keychain_delete(f"{KEYCHAIN_CHUNK_PREFIX}{index}")
+    for index, chunk in enumerate(chunks):
+        proc = subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                f"{KEYCHAIN_CHUNK_PREFIX}{index}",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            input=f"{chunk}\n{chunk}\n",
+            capture_output=True,
+            text=True,
         )
+        if proc.returncode != 0:
+            raise MiMoError(
+                f"无法写入 macOS Keychain: {_sanitize_text(proc.stderr.strip())}",
+                code="keychain",
+            )
 
 
 def _dpapi_read():
@@ -266,19 +336,21 @@ def _dpapi_read():
 
 def _dpapi_write(payload):
     secret = _config_dir() / "secret"
-    _config_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_config_dir())
     command = (
-        "$s = ConvertTo-SecureString $env:MIMO_CREDENTIALS_JSON -AsPlainText -Force; "
+        "$payload = [Console]::In.ReadToEnd(); "
+        "$s = ConvertTo-SecureString $payload -AsPlainText -Force; "
         "$e = ConvertFrom-SecureString $s; "
         "Set-Content -LiteralPath $env:MIMO_SECRET_FILE -Value $e -NoNewline"
     )
     env = {
         **os.environ,
-        "MIMO_CREDENTIALS_JSON": payload,
         "MIMO_SECRET_FILE": str(secret),
     }
+    env.pop("MIMO_CREDENTIALS_JSON", None)
     proc = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        input=payload,
         capture_output=True,
         text=True,
         env=env,
@@ -299,11 +371,12 @@ def _read_file():
 
 def _write_file(payload):
     path = _credentials_path()
-    _config_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_config_dir())
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    if os.name != "nt":
-        os.chmod(tmp, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600) if os.name != "nt" else os.open(tmp, flags)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(payload)
     os.replace(tmp, path)
     if os.name == "nt":
         _restrict_windows_file(path)
@@ -318,7 +391,7 @@ def _remove_file():
 
 @contextmanager
 def _config_lock():
-    _config_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_config_dir())
     with open(_lock_path(), "a+b") as handle:
         if fcntl:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -340,11 +413,12 @@ def _config_lock():
 
 def _write_job_file(job):
     path = _job_path(job["id"])
-    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_jobs_dir())
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
-    if os.name != "nt":
-        os.chmod(tmp, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600) if os.name != "nt" else os.open(tmp, flags)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(job, ensure_ascii=False))
     os.replace(tmp, path)
 
 
@@ -352,39 +426,58 @@ def _read_job(job_id):
     path = _job_path(job_id)
     if not path.exists():
         raise MiMoError(f"任务不存在：{job_id}", code="job_not_found")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MiMoError(f"任务文件损坏或不可读：{job_id}", code="job_corrupt") from exc
+
+
+def _job_stale_after(job):
+    return _effective_timeout(job.get("timeout")) * 2 + 120
 
 
 def _claim_next_job():
-    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_jobs_dir())
     for path in sorted(_jobs_dir().glob("*.json")):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if job.get("status") == "pending":
-            job["status"] = "running"
-            _write_job_file(job)
-            return job
+        status = job.get("status")
+        if status not in ("pending", "running"):
+            continue
+        if status == "running":
+            started = job.get("started") or 0
+            if time.time() - started <= _job_stale_after(job):
+                continue
+        job["status"] = "running"
+        job["started"] = time.time()
+        _write_job_file(job)
+        return job
     return None
 
 
 def _spawn_worker():
     script = Path(__file__).resolve()
-    _config_dir().mkdir(parents=True, exist_ok=True)
-    with open(_worker_log_path(), "ab") as log:
-        kwargs = {
-            "stdin": subprocess.DEVNULL,
-            "stdout": log,
-            "stderr": subprocess.STDOUT,
-        }
-        if os.name == "nt":
-            kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            )
-        else:
-            kwargs["start_new_session"] = True
+    _secure_mkdir(_config_dir())
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        kwargs["start_new_session"] = True
+    try:
         subprocess.Popen([sys.executable, str(script), "worker"], **kwargs)
+    except OSError as exc:
+        raise MiMoError(
+            f"无法启动后台任务：{_sanitize_text(str(exc))}",
+            code="worker_spawn",
+        )
 
 
 def _job_command(job):
@@ -407,6 +500,8 @@ def _job_command(job):
             cmd += ["--urls", url]
         if job.get("kind"):
             cmd += ["--kind", job["kind"]]
+        if job.get("timeout"):
+            cmd += ["--timeout", str(job["timeout"])]
         cmd += ["--prompt", job.get("prompt") or "请基于附件内容直接、简洁地回答。"]
         return cmd
     cmd = [
@@ -420,6 +515,8 @@ def _job_command(job):
         "--max-tokens",
         str(job.get("max_tokens", 2048)),
     ]
+    if job.get("timeout"):
+        cmd += ["--timeout", str(job["timeout"])]
     return cmd
 
 
@@ -479,10 +576,19 @@ def load_config():
             if not fallback:
                 raise
             cfg = _decode_config_raw(fallback)
+    file_raw = _read_file()
+    if file_raw:
+        try:
+            file_cfg = _decode_config_raw(file_raw)
+            if file_cfg.get("saved_at", 0) > cfg.get("saved_at", 0):
+                cfg = file_cfg
+        except MiMoError:
+            pass
     return _merge_defaults(cfg)
 
 
 def save_config(cfg):
+    cfg["saved_at"] = time.time()
     payload = json.dumps(cfg, ensure_ascii=False, indent=2)
     with _config_lock():
         if sys.platform == "darwin" and not _use_file_backend():
@@ -550,90 +656,116 @@ def _validate_prefix(plan, key):
         )
 
 
-def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key"):
+def _write_curl_config(key, auth_header):
+    header = f"api-key: {key}" if auth_header == "api-key" else f"Authorization: Bearer {key}"
+    handle = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        delete=False,
+        prefix="mimo-curl-",
+    )
+    handle.write(f'header = "{header}"\n')
+    handle.close()
+    if os.name != "nt":
+        os.chmod(handle.name, 0o600)
+    return handle.name
+
+
+def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key", timeout=None):
+    timeout = _effective_timeout(timeout)
     key = credentials.get("api_key", "")
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     curl = shutil.which("curl")
-    if curl:
-        cmd = [
-            curl,
-            "--silent",
-            "--show-error",
-            "--max-time",
-            str(REQUEST_TIMEOUT),
-            "--connect-timeout",
-            "15",
-            "--write-out",
-            "\n%{http_code}",
-            "-X",
-            method,
-        ]
-        if auth_header == "api-key":
-            cmd += ["-H", f"api-key: {key}"]
-        else:
-            cmd += ["-H", f"Authorization: Bearer {key}"]
-        cmd += ["-H", "Content-Type: application/json"]
-        if data is not None:
-            cmd += ["--data-binary", "@-"]
-        cmd.append(url)
+    use_curl = curl and os.environ.get("MIMO_USE_CURL", "").strip().lower() in ("1", "true")
+    if use_curl:
+        config_path = _write_curl_config(key, auth_header)
+        try:
+            cmd = [
+                curl,
+                "--config",
+                config_path,
+                "--silent",
+                "--show-error",
+                "--max-time",
+                str(timeout),
+                "--connect-timeout",
+                "15",
+                "--write-out",
+                "\n%{http_code}",
+                "-X",
+                method,
+            ]
+            cmd += ["-H", "Content-Type: application/json"]
+            if data is not None:
+                cmd += ["--data-binary", "@-"]
+            cmd.append(url)
 
-        last_error = None
-        for attempt in range(retries + 1):
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    input=data,
-                    capture_output=True,
-                    timeout=REQUEST_TIMEOUT + 5,
-                )
-            except subprocess.TimeoutExpired:
-                message = f"请求超时（超过 {REQUEST_TIMEOUT} 秒），请稍后重试或改用更小的文件"
-                last_error = MiMoError(message, code="timeout")
-                if attempt < retries:
-                    time.sleep(1 + attempt)
-                    continue
-                raise last_error
-
-            output = proc.stdout.decode("utf-8", errors="replace")
-            if proc.returncode != 0:
-                stderr = proc.stderr.decode("utf-8", errors="replace")
-                message = (
-                    "网络错误: "
-                    + _sanitize_text(stderr or output, [key, credentials.get("base_url", "")])
-                )
-                last_error = MiMoError(message, code="network")
-                if attempt < retries:
-                    time.sleep(1 + attempt)
-                    continue
-                raise last_error
-
-            body = output
-            status = 0
-            if "\n" in output:
-                body, status_raw = output.rsplit("\n", 1)
+            last_error = None
+            for attempt in range(retries + 1):
                 try:
-                    status = int(status_raw.strip())
-                except ValueError:
-                    status = 0
+                    proc = subprocess.run(
+                        cmd,
+                        input=data,
+                        capture_output=True,
+                        timeout=timeout + 5,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise MiMoError(
+                        f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                        code="timeout",
+                    )
 
-            if status >= 400:
-                message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                last_error = MiMoError(message, code=status)
-                if status in (429, 500, 502, 503, 504) and attempt < retries:
-                    time.sleep(1 + attempt)
-                    continue
-                raise last_error
+                output = proc.stdout.decode("utf-8", errors="replace")
+                if proc.returncode != 0:
+                    stderr = proc.stderr.decode("utf-8", errors="replace")
+                    raw_error = stderr or output
+                    if "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
+                        raise MiMoError(
+                            f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                            code="timeout",
+                        )
+                    message = (
+                        "网络错误: "
+                        + _sanitize_text(raw_error, [key, credentials.get("base_url", "")])
+                    )
+                    last_error = MiMoError(message, code="network")
+                    if attempt < retries:
+                        time.sleep(1 + attempt)
+                        continue
+                    raise last_error
 
+                body = output
+                status = 0
+                if "\n" in output:
+                    body, status_raw = output.rsplit("\n", 1)
+                    try:
+                        status = int(status_raw.strip())
+                    except ValueError:
+                        status = 0
+
+                if status >= 400:
+                    message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                    last_error = MiMoError(message, code=status)
+                    if status in (429, 500, 502, 503, 504) and attempt < retries:
+                        time.sleep(1 + attempt)
+                        continue
+                    raise last_error
+
+                try:
+                    return json.loads(body), status or 200
+                except json.JSONDecodeError:
+                    message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                    last_error = MiMoError(message, code="parse")
+                    if attempt < retries:
+                        time.sleep(1 + attempt)
+                        continue
+                    raise last_error
+            raise last_error or MiMoError("请求失败", code="unknown")
+        finally:
             try:
-                return json.loads(body), status or 200
-            except json.JSONDecodeError:
-                message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                last_error = MiMoError(message, code="parse")
-                if attempt < retries:
-                    time.sleep(1 + attempt)
-                    continue
-                raise last_error
-        raise last_error or MiMoError("请求失败", code="unknown")
+                os.unlink(config_path)
+            except OSError:
+                pass
 
     headers = {"Content-Type": "application/json"}
     if auth_header == "api-key":
@@ -645,18 +777,16 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with _request_timeout_call(
-                REQUEST_TIMEOUT,
-                lambda: urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT, context=_ssl_context()),
+                timeout,
+                lambda: urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()),
             ) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 return json.loads(body), response.status
         except _RequestTimeout:
-            message = f"请求超时（超过 {REQUEST_TIMEOUT} 秒），请稍后重试或改用更小的文件"
-            last_error = MiMoError(message, code="timeout")
-            if attempt < retries:
-                time.sleep(1 + attempt)
-                continue
-            raise last_error
+            raise MiMoError(
+                f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                code="timeout",
+            )
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             message = f"HTTP {exc.code}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
@@ -666,7 +796,13 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
                 continue
             raise last_error
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            message = f"网络错误: {_sanitize_text(str(exc), [key, credentials.get('base_url', '')])}"
+            raw_error = str(exc)
+            if isinstance(exc, TimeoutError) or "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
+                raise MiMoError(
+                    f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                    code="timeout",
+                )
+            message = f"网络错误: {_sanitize_text(raw_error, [key, credentials.get('base_url', '')])}"
             last_error = MiMoError(message, code="network")
             if attempt < retries:
                 time.sleep(1 + attempt)
@@ -675,12 +811,12 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
     raise MiMoError("请求失败", code="unknown")
 
 
-def chat_completions(credentials, payload):
+def chat_completions(credentials, payload, timeout=None):
     url = credentials["base_url"].rstrip("/") + "/chat/completions"
     last_error = None
     for auth_header in ("api-key", "bearer"):
         try:
-            return _http_json(url, credentials, payload=payload, auth_header=auth_header)
+            return _http_json(url, credentials, payload=payload, auth_header=auth_header, timeout=timeout)
         except MiMoError as exc:
             if exc.code in (401, 403):
                 last_error = exc
@@ -689,12 +825,19 @@ def chat_completions(credentials, payload):
     raise last_error or MiMoError("认证失败", code=401)
 
 
-def list_models(credentials):
+def list_models(credentials, timeout=None):
     url = credentials["base_url"].rstrip("/") + "/models"
     last_error = None
     for auth_header in ("api-key", "bearer"):
         try:
-            data, _ = _http_json(url, credentials, method="GET", retries=1, auth_header=auth_header)
+            data, _ = _http_json(
+                url,
+                credentials,
+                method="GET",
+                retries=1,
+                auth_header=auth_header,
+                timeout=timeout,
+            )
             if isinstance(data, dict):
                 return data.get("data") or []
             if isinstance(data, list):
@@ -793,6 +936,14 @@ def _extract_content(data):
     message = choice.get("message") or {}
     content = message.get("content")
     reasoning = message.get("reasoning_content")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+            else:
+                parts.append(str(item))
+        content = "".join(parts)
     if content is None or content == "":
         if reasoning:
             return reasoning, True
@@ -805,18 +956,16 @@ def _finish_reason(data):
     return choice.get("finish_reason")
 
 
-def _chat_with_retry(credentials, body, max_tokens):
-    data, _ = chat_completions(credentials, body)
+def _chat_with_retry(credentials, body, max_tokens, timeout=None):
+    data, _ = chat_completions(credentials, body, timeout=timeout)
     current_max = max_tokens
-    for _ in range(4):
-        content, _ = _extract_content(data)
-        if content and _finish_reason(data) != "length":
+    cap = max(4096, max_tokens * 2)
+    for _ in range(2):
+        if _finish_reason(data) != "length" or current_max >= cap:
             break
-        if current_max >= 4096:
-            break
-        current_max = min(current_max * 2, 4096)
+        current_max = min(current_max * 2, cap)
         body["max_completion_tokens"] = current_max
-        data, _ = chat_completions(credentials, body)
+        data, _ = chat_completions(credentials, body, timeout=timeout)
     return data
 
 
@@ -878,6 +1027,20 @@ def _cost_for(plan, model, usage, duration, pricing):
     return round(cost, 4), None
 
 
+def _mask_media(value):
+    if isinstance(value, dict):
+        return {key: _mask_media(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_mask_media(item) for item in value]
+    if isinstance(value, str) and value.startswith("data:"):
+        return "data:<media>;base64,***"
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(value)
+        if parsed.query:
+            return urllib.parse.urlunparse(parsed._replace(query="***"))
+    return value
+
+
 def _print_dry_run(command, plan, credentials, body, extra=None):
     output = {
         "ok": True,
@@ -885,7 +1048,7 @@ def _print_dry_run(command, plan, credentials, body, extra=None):
         "dry_run": True,
         "plan": plan,
         "base_url": _mask_url(credentials.get("base_url", "")),
-        "request": body,
+        "request": _mask_media(body),
     }
     if extra:
         output.update(extra)
@@ -1086,6 +1249,17 @@ def cmd_poll(args):
                 pass
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
+        if status == "running":
+            started = job.get("started") or 0
+            if time.time() - started > _job_stale_after(job):
+                with _config_lock():
+                    fresh = _read_job(args.job)
+                    if fresh.get("status") == "running":
+                        fresh["status"] = "pending"
+                        fresh.pop("started", None)
+                        _write_job_file(fresh)
+                _spawn_worker()
+                continue
         if time.time() >= deadline:
             print(
                 json.dumps(
@@ -1104,18 +1278,28 @@ def cmd_poll(args):
 
 
 def cmd_jobs(args):
-    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(_jobs_dir())
     jobs = []
+    now = time.time()
     for path in sorted(_jobs_dir().glob("*.json")):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        status = job.get("status")
+        if status in ("done", "error"):
+            finished = job.get("finished") or job.get("created") or 0
+            if now - finished > 86400:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
         jobs.append(
             {
                 "job_id": job.get("id"),
                 "command": job.get("command"),
-                "status": job.get("status"),
+                "status": status,
                 "created": job.get("created"),
             }
         )
@@ -1135,12 +1319,13 @@ def cmd_worker(args):
         if not job:
             break
         job_id = job["id"]
+        job_timeout = _effective_timeout(job.get("timeout"))
         try:
             proc = subprocess.run(
                 _job_command(job),
                 capture_output=True,
                 text=True,
-                timeout=REQUEST_TIMEOUT * 4 + 30,
+                timeout=job_timeout * 2 + 60,
             )
             output = (proc.stdout or "").strip()
             try:
@@ -1164,6 +1349,7 @@ def cmd_worker(args):
         with _config_lock():
             job["status"] = "done" if result.get("ok") else "error"
             job["result"] = result
+            job["finished"] = time.time()
             _write_job_file(job)
 
 
@@ -1171,16 +1357,67 @@ def cmd_analyze(args):
     cfg = load_config()
     plan = active_plan(cfg)
     creds = active_credentials(cfg)
+    timeout = _effective_timeout(args.timeout)
+
+    if args.media:
+        if args.files or args.urls:
+            if args.prompt:
+                raise MiMoError("不能同时使用位置参数问题和 --prompt", code="usage")
+            args.prompt = " ".join(args.media)
+        else:
+            if len(args.media) > 1 and args.prompt:
+                raise MiMoError("不能同时使用位置参数问题和 --prompt", code="usage")
+            args.files = [args.media[0]]
+            if not args.prompt:
+                args.prompt = " ".join(args.media[1:])
 
     if not args.files and not args.urls:
         raise MiMoError("请提供 --files 或 --urls", code="usage")
+
+    prompt = args.prompt or "请基于附件内容直接、简洁地回答。"
+    if args.async_mode:
+        job = {
+            "id": uuid.uuid4().hex,
+            "created": time.time(),
+            "status": "pending",
+            "command": "analyze",
+            "files": args.files,
+            "urls": args.urls,
+            "kind": args.kind,
+            "prompt": prompt,
+            "max_tokens": args.max_tokens,
+            "fps": args.fps,
+            "resolution": args.resolution,
+            "timeout": timeout,
+        }
+        _write_job_file(job)
+        try:
+            _spawn_worker()
+        except MiMoError as exc:
+            job["status"] = "error"
+            job["result"] = {"ok": False, "error": str(exc), "code": exc.code}
+            job["finished"] = time.time()
+            _write_job_file(job)
+            raise
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "analyze",
+                    "async": True,
+                    "job_id": job["id"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
     parts = _file_parts(args.files, args.fps, args.resolution)
     parts.extend(_url_parts(args.urls, args.kind, args.fps, args.resolution))
     if not parts:
         raise MiMoError("没有可处理的媒体内容", code="usage")
 
-    prompt = args.prompt or "请基于附件内容直接、简洁地回答。"
     today = date.today().isoformat()
     system = (
         "You are MiMo, an AI assistant developed by Xiaomi. "
@@ -1206,40 +1443,10 @@ def cmd_analyze(args):
         _print_dry_run("analyze", dry_plan, dry_creds, body)
         return
 
-    if args.async_mode:
-        job = {
-            "id": uuid.uuid4().hex,
-            "created": time.time(),
-            "status": "pending",
-            "command": "analyze",
-            "files": args.files,
-            "urls": args.urls,
-            "kind": args.kind,
-            "prompt": prompt,
-            "max_tokens": args.max_tokens,
-            "fps": args.fps,
-            "resolution": args.resolution,
-        }
-        _write_job_file(job)
-        _spawn_worker()
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "command": "analyze",
-                    "async": True,
-                    "job_id": job["id"],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        return
-
     if not creds:
         raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
 
-    data = _chat_with_retry(creds, body, args.max_tokens)
+    data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
     content, reasoning_fallback = _extract_content(data)
     finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
@@ -1255,6 +1462,7 @@ def cmd_analyze(args):
         "plan": plan,
         "usage": usage,
         "finish_reason": finish_reason,
+        "truncated": finish_reason == "length",
         "reasoning_fallback": reasoning_fallback,
     }
     if plan == "payg":
@@ -1274,6 +1482,7 @@ def cmd_asr(args):
     ext = path.suffix.lower().lstrip(".")
     if ext not in ("wav", "mp3"):
         raise MiMoError("ASR 仅支持 wav/mp3 音频", code="usage")
+    timeout = _effective_timeout(args.timeout)
 
     if args.async_mode:
         job = {
@@ -1284,9 +1493,17 @@ def cmd_asr(args):
             "file": args.file,
             "language": args.language,
             "max_tokens": args.max_tokens,
+            "timeout": timeout,
         }
         _write_job_file(job)
-        _spawn_worker()
+        try:
+            _spawn_worker()
+        except MiMoError as exc:
+            job["status"] = "error"
+            job["result"] = {"ok": False, "error": str(exc), "code": exc.code}
+            job["finished"] = time.time()
+            _write_job_file(job)
+            raise
         print(
             json.dumps(
                 {
@@ -1335,7 +1552,7 @@ def cmd_asr(args):
     if not creds:
         raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
 
-    data = _chat_with_retry(creds, body, args.max_tokens)
+    data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
     content, reasoning_fallback = _extract_content(data)
     finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
@@ -1352,6 +1569,7 @@ def cmd_asr(args):
         "plan": plan,
         "usage": usage,
         "finish_reason": finish_reason,
+        "truncated": finish_reason == "length",
         "duration_seconds": duration,
         "reasoning_fallback": reasoning_fallback,
     }
@@ -1381,11 +1599,14 @@ def build_parser():
     subparsers.add_parser("diagnose", help="Check config, DNS and MiMo network connectivity")
 
     analyze = subparsers.add_parser("analyze", help="Analyze image/audio/video with mimo-v2.5")
+    analyze.add_argument("media", nargs="*", help="Local media path, then optional prompt words (e.g. /path/a.png 描述这张图)")
     analyze.add_argument("--files", action="append", default=[], help="Local media file (repeatable)")
     analyze.add_argument("--urls", action="append", default=[], help="Remote media URL (repeatable)")
+    analyze.add_argument("--url", dest="urls", action="append", help=argparse.SUPPRESS)
     analyze.add_argument("--kind", choices=["image", "audio", "video"], help="Media kind for URLs")
     analyze.add_argument("--prompt", help="Question for MiMo")
-    analyze.add_argument("--max-tokens", type=int, default=1024)
+    analyze.add_argument("--max-tokens", type=int, default=2048)
+    analyze.add_argument("--timeout", type=int, help="Request timeout in seconds (default 180)")
     analyze.add_argument("--fps", type=float, default=2.0)
     analyze.add_argument("--resolution", default="default")
     analyze.add_argument("--dry-run", action="store_true")
@@ -1395,6 +1616,7 @@ def build_parser():
     asr.add_argument("--file", required=True)
     asr.add_argument("--language", default="auto")
     asr.add_argument("--max-tokens", type=int, default=2048)
+    asr.add_argument("--timeout", type=int, help="Request timeout in seconds (default 180)")
     asr.add_argument("--dry-run", action="store_true")
     asr.add_argument("--async", dest="async_mode", action="store_true")
 
