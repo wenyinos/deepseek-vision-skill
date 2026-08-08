@@ -54,6 +54,7 @@ python3 scripts/mimo.py diagnose
 
 - 不要在任何命令行里直接粘贴 API Key，也不要让用户把 key 贴进聊天后写进本 skill 目录；配置用 `configure` 的不回显输入或一次性环境变量完成。
 - 默认请求走 Python 标准库，API Key 不进入进程参数；只有调试时才能显式设置 `MIMO_USE_CURL=1`，此时 key 通过临时配置文件传递，仍不会出现在命令行。
+- 所有 MiMo 请求默认直连，不经过终端或系统的 HTTP(S)_PROXY / ALL_PROXY 代理；即使 `MIMO_USE_CURL=1` 也会强制 `--noproxy '*'`。
 - 异步任务结果只在当前用户目录以 600 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理；worker 不再把媒体内容写入任何日志。
 - 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在系统安全存储和 `~/.config/deepseek-vision/credentials.json`（权限 600）。
 

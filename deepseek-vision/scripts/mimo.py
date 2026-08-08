@@ -698,6 +698,7 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
             cmd += ["-H", "Content-Type: application/json"]
             if data is not None:
                 cmd += ["--data-binary", "@-"]
+            cmd += ["--noproxy", "*"]
             cmd.append(url)
 
             last_error = None
@@ -775,10 +776,14 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
     last_error = None
     for attempt in range(retries + 1):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+        )
         try:
             with _request_timeout_call(
                 timeout,
-                lambda: urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()),
+                lambda: opener.open(request, timeout=timeout),
             ) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 return json.loads(body), response.status
