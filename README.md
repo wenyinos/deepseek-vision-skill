@@ -1,8 +1,6 @@
 # deepseek-vision skill
 
-deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也能处理图片、音频、视频和混合内容。遇到非文本内容时，Codex会交给小米 MiMo 模型处理，Codex 再基于 MiMo 返回的信息回答用户。
-
-本 skill 非全局技能，只有需要处理文本、图片、音频、视频、截图或混合文档时才使用。
+deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也能处理图片、音频和视频。遇到非文本内容时，Codex会交给小米 MiMo 模型处理，Codex 再基于 MiMo 返回的信息回答用户问题。
 
 ## 能力
 
@@ -12,7 +10,7 @@ deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也�
 - 分工明确：文本部分由 Codex 自己处理，媒体部分交给 MiMo，不把整个大文档塞给 MiMo。
 - 用量透明：使用Token Plan 会显示使用 token 数，使用 API 会显示使用人民币金额。
 - 全局配置：全局配置一次，任意对话、新开任务、重启后都能继续使用。
-- 多对话可用：MiMo 返回内容只在当前对话使用，不跨对话共享。
+- 多对话可用：MiMo 返回内容只在当前对话使用，不跨对话共享，可多对话同时使用。
 - 后台任务：识别较久时会进入后台，对话被中断后结果仍可取回。
 
 ## 安装
@@ -23,12 +21,12 @@ deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也�
 
 ## 配置
 
-在任意 Codex 对话里说“配置 deepseek-vision”，之后按Codex引导完成配置。
+在任意 Codex 对话里说“配置 deepseek-vision”后，按Codex引导完成配置。
 
 支持:
 
-- API：key 格式 `sk-xxxxx`。
-- Token Plan：key 格式 `tp-xxxxx`。
+- API： 格式 `sk-xxxxx`。
+- Token Plan： 格式 `tp-xxxxx`。
 
 ## 使用
 
@@ -40,17 +38,17 @@ deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也�
 
 ## 安全与隐私
 
+- 默认请求走 Python 标准库，API Key 和 Base URL 不进入进程参数。
 - 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录，也不写入仓库。
 - macOS 使用 Keychain 分块存储，Windows 使用 DPAPI，Linux/其他系统回退到 `600` 权限的用户目录配置。
-- 默认请求走 Python 标准库，API Key 不进入进程参数；只有调试时才可设置 `MIMO_USE_CURL=1`，此时 key 通过临时配置文件传递。
-- `--dry-run` 会脱敏媒体 Base64 和带参数的 URL；worker 不把媒体内容写入任何日志。
+- 运行时会脱敏模型 Base64 和带参数的 URL；agent 不把媒体内容写入任何日志。
 - 异步任务结果只在当前用户目录以 `600` 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理。
-- 错误信息会脱敏，不泄露 key 或完整 Base URL；遇到错误先自动处理，处理不了会明确告知用户。
+- 重要信息会脱敏，不泄露 key 或完整 Base URL。
 
 ## 环境要求
 
 - 已安装 [Codex](https://openai.com/zh-Hans-CN/codex/)。
-- 已安装 [Python 3](https://www.python.org/downloads/)
+- 已安装 [Python](https://www.python.org/downloads/)
 - 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile)，并配置 API Key 或 Token Plan。
 
 ## 注意事项
