@@ -1,51 +1,63 @@
-# deepseek-vision
+# deepseek-vision skill
 
-deepseek-vision 是一个能让 deepseek 在 Codex 里查看图片的 skill。平时 deepseek 只能看懂文字，你发的图片、音频、视频它都看不见、听不到。装上这个 skill 后，deepseek 会先把文件转交给小米的 MiMo V2.5 大模型，请它帮忙“看”和“听”，再把看懂的内容用中文告诉你。你只需要像平时一样把文件发给它、问问题，不需要任何特殊操作；每次使用后它还会告诉你这次消耗了多少 Token 或花了多少钱。
+deepseek-vision 是一个 Codex skill，让本身没有视觉能力的模型也能处理图片、音频、视频和混合内容。遇到非文本内容时，Codex会交给小米 MiMo 模型处理，Codex 再基于 MiMo 返回的信息回答用户。
 
-## 它能做什么
+本 skill 非全局技能，只有需要处理文本、图片、音频、视频、截图或混合文档时才使用。
 
-- 看图：识别图片里的内容，回答和图片相关的问题。
-- 听音：听懂音频内容，也能把音频转成文字。
-- 看视频：逐帧理解视频内容，总结视频在讲什么。
-- 成本透明：每次使用后都会显示 Token Plan 用量或按量付费金额。
-- 配置安全：API Key 保存在系统安全存储中，不会写进仓库或聊天记录。
-- 开箱即用：支持本地文件和公网链接，出错会自动重试并给出明确提示。
+## 能力
+
+- 图片理解：识别图片内容，回答与图片相关的问题。
+- 音频理解：听懂音频内容、支持转文字/听写。
+- 视频理解：按帧理解视频内容并总结。
+- 分工明确：文本部分由 Codex 自己处理，媒体部分交给 MiMo，不把整个大文档塞给 MiMo。
+- 用量透明：使用Token Plan 会显示使用 token 数，使用 API 会显示使用人民币金额。
+- 全局配置：全局配置一次，任意对话、新开任务、重启后都能继续使用。
+- 多对话可用：MiMo 返回内容只在当前对话使用，不跨对话共享。
+- 后台任务：识别较久时会进入后台，对话被中断后结果仍可取回。
 
 ## 安装
 
-把 [deepseek-vision](https://github.com/reF0o0/deepseek-vision-skill) 这个链接发给 Codex，说“下载并安装这个 skill”。Codex 会帮你完成下载、安装和配置。
+1  把[仓库链接](https://github.com/reF0o0/deepseek-vision-skill)发给 Codex，说“下载并安装这个 skill”，Codex 会自动完成下载、安装。
 
-也可以到 [Releases 页面](https://github.com/reF0o0/deepseek-vision-skill/releases) 直接下载 skill 压缩包。
+2  从 [Releases 页面](https://github.com/reF0o0/deepseek-vision-skill/releases) 下载 skill 压缩包。
 
 ## 配置
 
-装好后，在 Codex 对话里直接输入“配置 deepseek-vision”，按提示二选一：
+在任意 Codex 对话里说“配置 deepseek-vision”，之后按Codex引导完成配置。
 
-- 按量付费：使用小米开放平台的 API Key。
-- Token Plan：订阅 Token Plan 后，使用专属 API Key 和专属 Base URL。
+支持:
 
-不需要自己敲命令，Codex 会在对话里帮你完成配置。
+- API：key 格式 `sk-xxxxx`。
+- Token Plan：key 格式 `tp-xxxxx`。
+
+## 使用
+
+在对话里直接发送图片、音频、视频并提问即可。
+
+## 超时与失败
+
+- MiMo 处理媒体通常需要几十秒到几分钟，默认请求超时 180 秒；请不要在 60 秒左右就判定失败，并耐心等待结果。如请求失败，Codex会明确告知或重试。
+
+## 安全与隐私
+
+- 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录，也不写入仓库。
+- macOS 使用 Keychain 分块存储，Windows 使用 DPAPI，Linux/其他系统回退到 `600` 权限的用户目录配置。
+- 默认请求走 Python 标准库，API Key 不进入进程参数；只有调试时才可设置 `MIMO_USE_CURL=1`，此时 key 通过临时配置文件传递。
+- `--dry-run` 会脱敏媒体 Base64 和带参数的 URL；worker 不把媒体内容写入任何日志。
+- 异步任务结果只在当前用户目录以 `600` 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理。
+- 错误信息会脱敏，不泄露 key 或完整 Base URL；遇到错误先自动处理，处理不了会明确告知用户。
 
 ## 环境要求
 
 - 已安装 [Codex](https://openai.com/zh-Hans-CN/codex/)。
-- 已安装 [Python](https://www.python.org/downloads/)。
-- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile)，并配置自己的 API Key 或 Token Plan。
-
-## 怎么用
-
-不需要记命令，直接在 Codex 对话里说需求：
-
-- 想识别图片：把图片发给 Codex，问“这张图片里有什么”。
-- 想听音频：把音频发给 Codex，问“这段音频说了什么”。
-- 想转文字：把音频发给 Codex，说“把这段音频转成文字”。
-- 想看视频：把视频发给 Codex，说“总结一下这个视频的内容”。
-- 识别比较慢时，Codex 会改用后台任务处理，完成后把结果告诉你。
+- 已安装 [Python 3](https://www.python.org/downloads/)
+- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile)，并配置 API Key 或 Token Plan。
 
 ## 注意事项
 
-- 隐私提醒：图片、音频、视频会以 Base64 形式上传到小米 MiMo API 处理，涉及机密或敏感内容时请勿使用。
-- 费用说明：按量付费按 token 和音频时长计费，Token Plan 会消耗订阅配额；文件越大、帧率越高、音频越长，费用越高。
-- 文件限制：单个文件超过约 50MB 无法处理；音频转文字目前只支持 wav 和 mp3。
-- 网络要求：需要能正常访问小米 MiMo API 的网络环境。
-- 安全提醒：请妥善保管 API Key，不要分享给别人，也不要写进代码或仓库。
+- Python脚本使用终端运行，skill默认直连MiMo，不使用代理。
+- 媒体会以 Base64 形式上传到小米 MiMo API 处理，涉及机密或敏感内容时请勿使用。
+- 单个本地文件超过约 50MB 后会无法处理；音频转文字目前只支持 `wav` 和 `mp3`。
+- 文件越大、帧率越高、音频越长，费用越高；Token Plan 消耗订阅配额，按量付费按 token 和音频时长计费。
+- 请妥善保管 API Key，不要写进代码、仓库或聊天记录。
+- 本skill不具有图片，视频等非文本内容生成功能。
