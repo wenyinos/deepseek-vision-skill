@@ -16,13 +16,13 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 ## 安装
 
-1  把[仓库链接](https://github.com/reF0o0/deepseek-vision-skill)发给 Codex，说“下载并安装这个 skill”，Codex 会自动完成下载、安装。
+1  把[仓库链接](https://github.com/reF0o0/deepseek-vision-skill)发给 agent，说“下载并安装这个 skill”，agent 会自动完成下载、安装。
 
 2  从 [Releases 页面](https://github.com/reF0o0/deepseek-vision-skill/releases) 下载 skill 压缩包，解压后把其中的 `deepseek-vision` 目录放到对应平台的 skill 目录：
 
    - Codex：`~/.codex/skills/deepseek-vision/`
-   - Claude Code：`~/.claude/skills/deepseek-vision/`（或项目内 `.claude/skills/deepseek-vision/`）
-   - OpenCode：`~/.config/opencode/skills/deepseek-vision/`（或项目内 `.opencode/skills/deepseek-vision/`）
+   - Claude Code：`~/.claude/skills/deepseek-vision/`
+   - OpenCode：`~/.config/opencode/skills/deepseek-vision/`
 
 ## 配置
 
@@ -30,9 +30,9 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 支持:
 
-- API： 格式 `sk-xxxxx`。
-- Token Plan： 格式 `tp-xxxxx`。
-- OpenCode Go： 格式 `sk-xxxxx`，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的 payg/token 官方渠道，未配置时会提示先配置官方渠道）。
+- MiMo API： 格式 `sk-xxxxx`。
+- MiMO Token Plan： 格式 `tp-xxxxx`。
+- OpenCode Go： 格式 `sk-xxxxx`，通过 OpenCode Zen Go 端点接入(请在对话中明确指出)。
 
 ## 使用
 
@@ -55,7 +55,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 - 已安装 [Codex](https://openai.com/zh-Hans-CN/codex/)、[Claude Code](https://code.claude.com/docs/en/setup) 或 [OpenCode](https://opencode.ai/docs/)（任一即可）。
 - 已安装 [Python](https://www.python.org/downloads/)
-- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile) 并配置 API Key 或 Token Plan，或已获取 OpenCode Go 渠道的 API Key。
+- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile) 并配置 API Key 或 Token Plan，或获取 [OpenCode Go](https://opencode.ai/gohttps://opencode.ai/go) 渠道的 API Key。
 
 ## 注意事项
 
