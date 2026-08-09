@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package skill
+        run: |
+          mkdir -p dist
+          zip -r "dist/deepseek-vision-$GITHUB_REF_NAME.zip" deepseek-vision \
+            -x "deepseek-vision/**/__pycache__/*" -x "*.DS_Store"
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "deepseek-vision-$GITHUB_REF_NAME"
