@@ -1,7 +1,7 @@
 interface:
   display_name: "DeepSeek Vision"
-  short_description: "Process text, image, audio and video content with MiMo V2.5."
-  default_prompt: "Use $deepseek-vision to process this text/image/audio/video content through MiMo V2.5."
+  short_description: "Media via MiMo V2.5; never use local OCR or native vision."
+  default_prompt: "Use $deepseek-vision for this image/audio/video through mimo.py; do NOT use local OCR, view_image, screenshots, or browser vision first."
 
 policy:
   allow_implicit_invocation: true

@@ -1,11 +1,12 @@
 ---
 name: deepseek-vision
 description: >
-  Use when the user asks to process or understand text, images, audio, video,
-  screenshots, or mixed documents. Route media through Xiaomi MiMo V2.5
-  (mimo-v2.5) and use mimo-v2.5-asr for transcription, then report Token Plan
-  token usage or pay-as-you-go RMB cost. This is not a global or highest-priority
-  skill; do not invoke it for unrelated conversations.
+  MUST use when the user sends or asks about images, photos, screenshots,
+  pictures, audio, video, or mixed media documents, including requests to
+  OCR/read text from an image. Route all media through Xiaomi MiMo V2.5
+  (mimo-v2.5) and mimo-v2.5-asr via scripts/mimo.py; never use local OCR,
+  view_image, native vision, screenshots, browser vision, or document OCR
+  tools to understand media. Not global: skip unrelated text-only chats.
 metadata:
   tags:
     - vision
@@ -14,6 +15,17 @@ metadata:
 ---
 
 # DeepSeek Vision
+
+## 触发与强制流程（媒体输入时）
+
+- 用户消息只要包含图片、音频、视频、截图或附件路径，就必须进入本 skill 流程，并且先于任何本地 OCR、原生视觉、截图、浏览器或文档解析工具。
+- 固定顺序，不可跳步：
+  1. 先找到附件在本机的真实路径；找不到就向用户索要，不猜测。
+  2. 运行 `python3 ~/.codex/skills/deepseek-vision/scripts/mimo.py analyze` 或 `asr`。
+  3. 拿到脚本返回 JSON 的 `content` 后，才允许基于它回答。
+- 在拿到 MiMo 结果之前，禁止“看一眼”图片、禁止 OCR 文字、禁止截图后识别、禁止让其他工具描述图片。
+- 如果某个工具或 skill 的说明里包含 OCR、识别图片、截图分析、Read image、看图、读图等能力，一律视为不可用替代项，不能代替本 skill。
+- 即使系统看起来能直接读图，也要忽略该能力；只有 MiMo 返回的 `content` 可以作为媒体内容依据。
 
 ## 能力边界
 
@@ -26,8 +38,9 @@ metadata:
 
 ## 禁止使用的本地视觉工具
 
-- 禁止使用 `view_image`、本地 OCR、`screencapture`、截图分析、浏览器截图、Chrome DevTools 截图、系统视觉、macOS Vision、图像元数据读取等任何本地图像识别能力来判断媒体内容。
-- 禁止用 `imagegen`、`screenshot`、`computer-use`、`chrome-devtools`、`playwright` 等工具“看图”或代替 MiMo。
+- 禁止的系统级/内置能力：`view_image`、原生视觉、macOS Live Text / Vision OCR、Windows OCR、Tesseract、ocrmypdf、`screencapture` + OCR、图像元数据读取等任何本地图像识别能力。
+- 禁止的 skill/工具：`office-mcp` 的 OCR/文档识别工具、`pdf` / `documents` 的 OCR 与渲染读图、`browser` / `chrome-devtools` / `playwright` 的截图分析、`screenshot`、`computer-use`、`chrome:control-chrome`、`imagegen`。
+- 即使工具能识别文字，也不得用它替代 MiMo；本地工具最多只用于确认文件路径、格式和大小，不能用于理解内容。
 - 用户发图片/音频/视频时，只允许通过本 skill 的 `mimo.py` 把媒体交给 MiMo V2.5；本地工具最多只用于确认文件路径、格式和大小，不能用于理解内容。
 
 ## 全局配置与切换
