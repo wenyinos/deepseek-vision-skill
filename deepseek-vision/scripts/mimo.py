@@ -681,6 +681,102 @@ def _write_curl_config(key, auth_header):
     return handle.name
 
 
+def _curl_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key", timeout=None):
+    timeout = _effective_timeout(timeout)
+    key = credentials.get("api_key", "")
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    curl = shutil.which("curl")
+    config_path = _write_curl_config(key, auth_header)
+    try:
+        cmd = [
+            curl,
+            "--config",
+            config_path,
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout),
+            "--connect-timeout",
+            "15",
+            "--write-out",
+            "\n%{http_code}",
+            "-X",
+            method,
+        ]
+        cmd += ["-H", "Content-Type: application/json"]
+        if data is not None:
+            cmd += ["--data-binary", "@-"]
+        cmd += ["--noproxy", "*"]
+        cmd.append(url)
+
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=data,
+                    capture_output=True,
+                    timeout=timeout + 5,
+                )
+            except subprocess.TimeoutExpired:
+                raise MiMoError(
+                    f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                    code="timeout",
+                )
+
+            output = proc.stdout.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode("utf-8", errors="replace")
+                raw_error = stderr or output
+                if "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
+                    raise MiMoError(
+                        f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                        code="timeout",
+                    )
+                message = (
+                    "网络错误: "
+                    + _sanitize_text(raw_error, [key, credentials.get("base_url", "")])
+                )
+                last_error = MiMoError(message, code="network")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            body = output
+            status = 0
+            if "\n" in output:
+                body, status_raw = output.rsplit("\n", 1)
+                try:
+                    status = int(status_raw.strip())
+                except ValueError:
+                    status = 0
+
+            if status >= 400:
+                message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code=status)
+                if status in (429, 500, 502, 503, 504) and attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            try:
+                return json.loads(body), status or 200
+            except json.JSONDecodeError:
+                message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code="parse")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+        raise last_error or MiMoError("请求失败", code="unknown")
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
 def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key", timeout=None):
     timeout = _effective_timeout(timeout)
     key = credentials.get("api_key", "")
@@ -688,95 +784,7 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
     curl = shutil.which("curl")
     use_curl = curl and os.environ.get("MIMO_USE_CURL", "").strip().lower() in ("1", "true")
     if use_curl:
-        config_path = _write_curl_config(key, auth_header)
-        try:
-            cmd = [
-                curl,
-                "--config",
-                config_path,
-                "--silent",
-                "--show-error",
-                "--max-time",
-                str(timeout),
-                "--connect-timeout",
-                "15",
-                "--write-out",
-                "\n%{http_code}",
-                "-X",
-                method,
-            ]
-            cmd += ["-H", "Content-Type: application/json"]
-            if data is not None:
-                cmd += ["--data-binary", "@-"]
-            cmd += ["--noproxy", "*"]
-            cmd.append(url)
-
-            last_error = None
-            for attempt in range(retries + 1):
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        input=data,
-                        capture_output=True,
-                        timeout=timeout + 5,
-                    )
-                except subprocess.TimeoutExpired:
-                    raise MiMoError(
-                        f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
-                        code="timeout",
-                    )
-
-                output = proc.stdout.decode("utf-8", errors="replace")
-                if proc.returncode != 0:
-                    stderr = proc.stderr.decode("utf-8", errors="replace")
-                    raw_error = stderr or output
-                    if "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
-                        raise MiMoError(
-                            f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
-                            code="timeout",
-                        )
-                    message = (
-                        "网络错误: "
-                        + _sanitize_text(raw_error, [key, credentials.get("base_url", "")])
-                    )
-                    last_error = MiMoError(message, code="network")
-                    if attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-
-                body = output
-                status = 0
-                if "\n" in output:
-                    body, status_raw = output.rsplit("\n", 1)
-                    try:
-                        status = int(status_raw.strip())
-                    except ValueError:
-                        status = 0
-
-                if status >= 400:
-                    message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                    last_error = MiMoError(message, code=status)
-                    if status in (429, 500, 502, 503, 504) and attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-
-                try:
-                    return json.loads(body), status or 200
-                except json.JSONDecodeError:
-                    message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                    last_error = MiMoError(message, code="parse")
-                    if attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-            raise last_error or MiMoError("请求失败", code="unknown")
-        finally:
-            try:
-                os.unlink(config_path)
-            except OSError:
-                pass
+        return _curl_json(url, credentials, payload, method, retries, auth_header, timeout)
 
     headers = {"Content-Type": "application/json"}
     if auth_header == "api-key":
@@ -806,6 +814,11 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
             body = exc.read().decode("utf-8", errors="replace")
             message = f"HTTP {exc.code}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
             last_error = MiMoError(message, code=exc.code)
+            if exc.code == 403 and curl:
+                try:
+                    return _curl_json(url, credentials, payload, method, retries, auth_header, timeout)
+                except MiMoError:
+                    pass
             if exc.code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(1 + attempt)
                 continue
