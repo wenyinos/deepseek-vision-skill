@@ -6,11 +6,6 @@ description: >
   (mimo-v2.5) and use mimo-v2.5-asr for transcription, then report Token Plan
   token usage or pay-as-you-go RMB cost. This is not a global or highest-priority
   skill; do not invoke it for unrelated conversations.
-metadata:
-  tags:
-    - vision
-    - media
-    - mimo
 ---
 
 # DeepSeek Vision
@@ -26,8 +21,10 @@ metadata:
 
 ## 禁止使用的本地视觉工具
 
-- 禁止使用 `view_image`、本地 OCR、`screencapture`、截图分析、浏览器截图、Chrome DevTools 截图、系统视觉、macOS Vision、图像元数据读取等任何本地图像识别能力来判断媒体内容。
-- 禁止用 `imagegen`、`screenshot`、`computer-use`、`chrome-devtools`、`playwright` 等工具“看图”或代替 MiMo。
+本 skill 对 Codex、Claude Code、OpenCode 三平台同样生效：无论哪个 agent，都禁止用自身本地视觉能力判断媒体内容。
+
+- 禁止使用任何本地图像识别能力来判断媒体内容，包括但不限于：Codex 的 `view_image`、`computer-use`、`chrome-devtools`、`playwright`；Claude Code 的 `Read`（直接读图片文件——Claude 本身是多模态模型，最容易误以为“亲眼看到”了）、浏览器截图、MCP 截图工具；OpenCode 的 `read` 或 `bash` 里调用图像查看命令；以及各平台通用的本地 OCR、`screencapture`、macOS Vision、图像元数据读取、截图分析。
+- 禁止用 `imagegen`、`screenshot` 等工具“生成/截取”媒体内容代替 MiMo。
 - 用户发图片/音频/视频时，只允许通过本 skill 的 `mimo.py` 把媒体交给 MiMo V2.5；本地工具最多只用于确认文件路径、格式和大小，不能用于理解内容。
 
 ## 全局配置与切换
@@ -36,19 +33,21 @@ metadata:
 - 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录；它们由 `mimo.py` 保存到系统安全存储或用户目录下的外部配置中。
 - 配置会同时写入系统安全存储和用户目录下权限受限的外部备份；系统安全存储偶发不可读时，脚本会自动使用备份，避免误报“未配置”。
 - 如果 `status` 或 `check` 返回“尚未配置”，先运行 `python3 scripts/mimo.py status` 确认；确认确实未配置后再运行 `configure`，不要把已有配置覆盖掉。
-- 首次配置前，先向用户说明两种方式都可使用：
+- 首次配置前，先向用户说明三种方式都可使用：
   - 按量付费：key 格式 `sk-xxxxx`，在控制台 API Keys 创建，Base URL 为 `https://api.xiaomimimo.com/v1`。
   - Token Plan：key 格式 `tp-xxxxx`，在 `https://platform.xiaomimimo.com/token-plan` 订阅，从 Token Plan 页面复制专属 API Key 和专属 Base URL。
+  - OpenCode Go：key 格式 `sk-xxxxx`，通过 OpenCode 的 Zen Go 端点接入，Base URL 为 `https://opencode.ai/zen/go/v1`。
 
 ```bash
 python3 scripts/mimo.py configure --plan payg
 python3 scripts/mimo.py configure --plan token --base-url "https://你的专属TokenPlan地址/v1"
+python3 scripts/mimo.py configure --plan opencode_go
 python3 scripts/mimo.py status
 python3 scripts/mimo.py check
 python3 scripts/mimo.py diagnose
 ```
 
-用户说“切换到 Token Plan / 改用 Token Plan”时运行 `python3 scripts/mimo.py use --plan token`；说“切换到 API Key / 改用按量付费”时运行 `python3 scripts/mimo.py use --plan payg`；说“查看当前配置”时运行 `status`。切换后立即全局生效。
+用户说“切换到 Token Plan / 改用 Token Plan”时运行 `python3 scripts/mimo.py use --plan token`；说“切换到 API Key / 改用按量付费”时运行 `python3 scripts/mimo.py use --plan payg`；说“切换到 OpenCode Go / 改用 OpenCode Go”时运行 `python3 scripts/mimo.py use --plan opencode_go`；说“查看当前配置”时运行 `status`。切换后立即全局生效。
 
 安全与隐私：
 
@@ -70,6 +69,9 @@ python3 scripts/mimo.py analyze --url https://example.com/a.jpg 这张图里有�
 
 # 音频转文字/听写
 python3 scripts/mimo.py asr --file /path/to/audio.mp3 --language auto
+
+# 注意：OpenCode Go 渠道不支持 ASR（mimo-v2.5-asr），使用 asr 前需确认 active plan 为 payg 或 token（use --plan payg/token）；
+# OpenCode Go 渠道仍可用 analyze 处理音频理解（mimo-v2.5）。
 
 # 不发送请求，只检查请求体（key 与 Base URL 会脱敏）
 python3 scripts/mimo.py analyze --files /path/to/file.png --prompt "测试" --dry-run
@@ -100,7 +102,7 @@ python3 scripts/mimo.py poll --job <job_id> --wait 120
 
 如果 `content` 为空但返回 `reasoning_fallback: true`，说明 MiMo 只返回了 `reasoning_content`；此时要把内容标明为模型推理过程，不能当作正式回答。
 
-以上命令请在 skill 目录下运行；如果当前目录不是 skill，可先执行 `cd ~/.codex/skills/deepseek-vision`，或直接使用绝对路径 `python3 ~/.codex/skills/deepseek-vision/scripts/mimo.py`。非交互式配置可通过 `MIMO_API_KEY` 环境变量提供 key，Token Plan 再通过 `--base-url` 提供专属 Base URL。
+以上命令请在 skill 安装目录下运行；如果当前目录不是 skill，可先 `cd` 到安装目录，或直接使用绝对路径调用 `scripts/mimo.py`。非交互式配置可通过 `MIMO_API_KEY` 环境变量提供 key，Token Plan 再通过 `--base-url` 提供专属 Base URL。
 
 ## 禁止承诺式回复
 
@@ -115,14 +117,15 @@ python3 scripts/mimo.py poll --job <job_id> --wait 120
 
 - Token Plan：`已通过 MiMo V2.5 处理 · Token Plan · 本次约 N tokens`
 - 按量付费：`已通过 MiMo V2.5 处理 · 按量付费 · 本次约 ¥0.xxxx`
+- OpenCode Go：`已通过 MiMo V2.5 处理 · OpenCode Go · 本次约 N tokens`
 
-按量付费金额来自脚本返回的 `cost_cny`；Token Plan token 数来自 `tokens`。如果 `cost_cny` 为 null，说明无法精确计价，应注明“金额以官方账单为准”。
+按量付费金额来自脚本返回的 `cost_cny`；Token Plan 与 OpenCode Go 的 token 数来自 `tokens`。如果 `cost_cny` 为 null，说明无法精确计价，应注明“金额以官方账单为准”。
 
 ## 错误处理
 
 - 遇到错误先自行处理：网络/429/5xx 自动重试；文件超限或格式不支持先压缩、转码或改用公网 URL；`finish_reason=length` 时提高 `--max-tokens` 或缩小问题；认证失败先检查 key 前缀、active plan、Base URL 是否匹配，并提示重新 `configure` 或切换 plan。
 - 如果脚本返回 `请求超时`：说明 MiMo 处理时间超过了当前超时；不要原地重复同样命令，应改用 `--async` 后台排队，或通过 `MIMO_TIMEOUT`/`--timeout` 把超时提高到 300 秒以上再试。
-- 如果脚本报 `Could not resolve host` / DNS 错误，说明当前任务没有可用的网络访问；先重试一次，仍失败就直接告诉用户检查 Codex 的网络或“完全访问”权限，不要反复猜测或伪装成功。
+- 如果脚本报 `Could not resolve host` / DNS 错误，说明当前任务没有可用的网络访问；先重试一次，仍失败就直接告诉用户检查当前 agent 的网络或工具权限，不要反复猜测或伪装成功。
 - 遇到“无法连接网络”时先运行 `python3 scripts/mimo.py diagnose`；若返回 `dns_ok: false` 或 `network_ok: false`，说明当前对话本身没有网络权限，应让用户在该对话开启网络/完全访问后重试，而不是继续重复请求。
 - 多个对话可以并行使用本 skill；如果某个对话正在执行长时间识别，另一个对话稍等重试即可，不要在同一对话里并发启动多个 `analyze` 命令。
 - 自行处理仍失败时，必须明确告诉用户：哪一步失败、错误码/API 原始错误信息（脱敏）、文件路径与大小、建议的修复动作。

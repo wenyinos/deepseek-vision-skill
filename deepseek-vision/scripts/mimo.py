@@ -35,11 +35,13 @@ except ImportError:
 
 DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
 TOKEN_PLAN_EXAMPLE = "https://token-plan-cn.xiaomimimo.com/v1"
+OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_MODEL = "mimo-v2.5"
 ASR_MODEL = "mimo-v2.5-asr"
 BASE64_LIMIT = 50 * 1024 * 1024
 PAYG_LABEL = "按量付费"
 TOKEN_LABEL = "Token Plan"
+OPENCODE_GO_LABEL = "OpenCode Go"
 _SSL_CONTEXT = None
 DEFAULT_TIMEOUT = 180
 
@@ -116,6 +118,7 @@ def _default_config():
         "active_plan": "",
         "payg": {"api_key": "", "base_url": DEFAULT_BASE_URL},
         "token": {"api_key": "", "base_url": ""},
+        "opencode_go": {"api_key": "", "base_url": OPENCODE_GO_BASE_URL},
         "pricing": _default_pricing(),
         "pricing_updated": "2026-08-03",
     }
@@ -610,7 +613,7 @@ def _plan_credentials(cfg, plan):
 
 def active_plan(cfg):
     plan = cfg.get("active_plan") or ""
-    return plan if plan in ("payg", "token") else ""
+    return plan if plan in ("payg", "token", "opencode_go") else ""
 
 
 def active_credentials(cfg):
@@ -628,6 +631,8 @@ def _env_credentials(plan):
         return None
     if plan == "payg":
         url = url or DEFAULT_BASE_URL
+    if plan == "opencode_go":
+        url = url or OPENCODE_GO_BASE_URL
     if plan == "token" and not url:
         return None
     return {"api_key": key, "base_url": url}
@@ -641,8 +646,13 @@ def _choose_plan_interactively():
     print("请选择配置方式：", file=sys.stderr)
     print("1) 按量付费 API Key（sk-xxxxx）", file=sys.stderr)
     print("2) Token Plan（tp-xxxxx + 专属 Base URL）", file=sys.stderr)
-    choice = input("请输入 1 或 2: ").strip()
-    return {"1": "payg", "2": "token"}.get(choice)
+    print("3) OpenCode Go（sk-xxxxx）", file=sys.stderr)
+    choice = input("请输入 1/2/3: ").strip()
+    return {"1": "payg", "2": "token", "3": "opencode_go"}.get(choice)
+
+
+def _plan_label(plan):
+    return {"payg": PAYG_LABEL, "token": TOKEN_LABEL, "opencode_go": OPENCODE_GO_LABEL}.get(plan, plan)
 
 
 def _validate_prefix(plan, key):
@@ -1065,7 +1075,7 @@ def cmd_configure(args):
     if not plan:
         if not _stdin_tty():
             raise MiMoError(
-                "请指定 --plan payg 或 --plan token；也可交互式运行 configure 选择",
+                "请指定 --plan payg、token 或 opencode_go；也可交互式运行 configure 选择",
                 code="usage",
             )
         plan = _choose_plan_interactively()
@@ -1074,6 +1084,8 @@ def cmd_configure(args):
 
     if plan == "payg":
         base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    elif plan == "opencode_go":
+        base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip() or OPENCODE_GO_BASE_URL
     else:
         base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip()
         if not base_url and _stdin_tty():
@@ -1090,7 +1102,7 @@ def cmd_configure(args):
 
     key = os.environ.get("MIMO_API_KEY", "").strip()
     if not key and _stdin_tty():
-        key = getpass.getpass(f"请输入 {TOKEN_LABEL if plan == 'token' else PAYG_LABEL} API Key（输入不回显）: ").strip()
+        key = getpass.getpass(f"请输入 {_plan_label(plan)} API Key（输入不回显）: ").strip()
     if not key:
         raise MiMoError(
             "未提供 API Key；请通过 MIMO_API_KEY 环境变量提供，或交互式运行 configure",
@@ -1123,10 +1135,10 @@ def cmd_use(args):
     missing = not creds.get("api_key") or (args.plan == "token" and not creds.get("base_url"))
     if missing:
         env_creds = _env_credentials(args.plan)
-        if env_creds and (args.plan == "payg" or env_creds.get("base_url")):
+        if env_creds and (args.plan != "token" or env_creds.get("base_url")):
             cfg[args.plan] = env_creds
         else:
-            label = TOKEN_LABEL if args.plan == "token" else PAYG_LABEL
+            label = _plan_label(args.plan)
             raise MiMoError(
                 f"{label} 尚未配置；请先运行 configure --plan {args.plan} 配置一次",
                 code="not_configured",
@@ -1159,6 +1171,7 @@ def cmd_status(args):
                 "active_plan": plan or None,
                 "payg_configured": bool(cfg.get("payg", {}).get("api_key")),
                 "token_configured": bool(cfg.get("token", {}).get("api_key")),
+                "opencode_go_configured": bool(cfg.get("opencode_go", {}).get("api_key")),
                 "active_key": _mask_value(creds.get("api_key", "")),
                 "active_base_url": _mask_url(creds.get("base_url", "")),
             },
@@ -1487,6 +1500,11 @@ def cmd_asr(args):
     ext = path.suffix.lower().lstrip(".")
     if ext not in ("wav", "mp3"):
         raise MiMoError("ASR 仅支持 wav/mp3 音频", code="usage")
+    if active_plan(load_config()) == "opencode_go":
+        raise MiMoError(
+            "OpenCode Go 渠道不支持 ASR（mimo-v2.5-asr）；请先运行 use --plan payg 或 use --plan token 切换到支持 ASR 的渠道",
+            code="usage",
+        )
     timeout = _effective_timeout(args.timeout)
 
     if args.async_mode:
@@ -1592,12 +1610,12 @@ def build_parser():
     parser = argparse.ArgumentParser(description="MiMo V2.5 helper for deepseek-vision")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    configure = subparsers.add_parser("configure", help="Configure pay-as-you-go or Token Plan")
-    configure.add_argument("--plan", choices=["payg", "token"], help="Plan to configure")
+    configure = subparsers.add_parser("configure", help="Configure pay-as-you-go, Token Plan or OpenCode Go")
+    configure.add_argument("--plan", choices=["payg", "token", "opencode_go"], help="Plan to configure")
     configure.add_argument("--base-url", help="Base URL (required for Token Plan)")
 
     use = subparsers.add_parser("use", help="Switch global active plan")
-    use.add_argument("--plan", required=True, choices=["payg", "token"])
+    use.add_argument("--plan", required=True, choices=["payg", "token", "opencode_go"])
 
     subparsers.add_parser("status", help="Show masked configuration status")
     subparsers.add_parser("check", help="Validate current credentials against MiMo API")
