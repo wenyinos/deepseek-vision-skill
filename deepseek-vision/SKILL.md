@@ -89,6 +89,7 @@ python3 scripts/mimo.py analyze --url https://example.com/a.jpg 这张图里有�
 python3 scripts/mimo.py asr --file /path/to/audio.mp3 --language auto
 
 # 注意：OpenCode Go 渠道不支持音频处理（analyze 与 ASR 均不可用）；音频请求会自动回退到已配置的官方渠道（payg/token），未配置官方渠道时会报错提示先 configure --plan payg/token。
+# 注意：m4a 音频在官方渠道 Base64 输入不兼容（官方端点限制，实测 400），脚本会自动用 ffmpeg 转码为 mp3 后处理；本机需安装 ffmpeg。
 
 # 不发送请求，只检查请求体（key 与 Base URL 会脱敏）
 python3 scripts/mimo.py analyze --files /path/to/file.png --prompt "测试" --dry-run

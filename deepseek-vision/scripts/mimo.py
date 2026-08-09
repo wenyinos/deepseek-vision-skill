@@ -2,11 +2,11 @@
 """Cross-platform MiMo V2.5 helper for the deepseek-vision skill."""
 
 import argparse
+import atexit
 import base64
 import getpass
 import json
 import os
-import re
 import shutil
 import signal
 import socket
@@ -919,10 +919,6 @@ def _part_for_mime(mime, data, fps, resolution):
     if mime.startswith("image/"):
         return {"type": "image_url", "image_url": {"url": data}}
     if mime.startswith("audio/"):
-        if data.startswith("data:"):
-            encoded = data.split(",", 1)[1]
-            fmt = mime.split("/")[-1]
-            return {"type": "input_audio", "input_audio": {"data": encoded, "format": fmt}}
         return {"type": "input_audio", "input_audio": {"data": data}}
     if mime.startswith("video/"):
         return {
@@ -932,6 +928,40 @@ def _part_for_mime(mime, data, fps, resolution):
             "media_resolution": resolution,
         }
     raise MiMoError(f"未知媒体类型 {mime}")
+
+
+_TEMP_FILES = []
+
+
+def _cleanup_temp_files():
+    for path in _TEMP_FILES:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_temp_files)
+
+
+def _transcode_audio_to_mp3(path):
+    """m4a 在官方渠道 Base64 输入不兼容（实测 400），用 ffmpeg 转 mp3；返回临时文件路径，进程退出自动清理。"""
+    if not shutil.which("ffmpeg"):
+        raise MiMoError("检测到 m4a 音频官方渠道不兼容，需转码为 mp3，但未找到 ffmpeg", code="transcode")
+    fd, tmp = tempfile.mkstemp(suffix=".mp3", prefix="mimo-")
+    os.close(fd)
+    _TEMP_FILES.append(tmp)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(path), "-codec:a", "libmp3lame", "-q:a", "5", tmp],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise MiMoError(
+            f"音频转码失败(ffmpeg): {_sanitize_text(proc.stderr.strip())}",
+            code="transcode",
+        )
+    return tmp
 
 
 def _file_parts(paths, fps, resolution):
@@ -1085,12 +1115,6 @@ def _mask_media(value):
         parsed = urllib.parse.urlparse(value)
         if parsed.query:
             return urllib.parse.urlunparse(parsed._replace(query="***"))
-    if (
-        isinstance(value, str)
-        and len(value) > 256
-        and re.fullmatch(r"[A-Za-z0-9+/=]+", value)
-    ):
-        return "data:<media>;base64,***"
     return value
 
 
@@ -1468,6 +1492,16 @@ def cmd_analyze(args):
             )
         )
         return
+
+    if args.files:
+        prepared = []
+        for f in args.files:
+            p = Path(f)
+            if p.suffix.lower().lstrip(".") == "m4a":
+                prepared.append(_transcode_audio_to_mp3(p))
+            else:
+                prepared.append(f)
+        args.files = prepared
 
     parts = _file_parts(args.files, args.fps, args.resolution)
     parts.extend(_url_parts(args.urls, args.kind, args.fps, args.resolution))
