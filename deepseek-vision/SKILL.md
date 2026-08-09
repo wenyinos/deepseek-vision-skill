@@ -30,8 +30,8 @@ description: >
 ## 全局配置与切换
 
 - 配置是全局共享的，一次配置后所有对话、新开任务、重启后都继续使用，不需要重新配置。
-- 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录；它们由 `mimo.py` 保存到系统安全存储或用户目录下的外部配置中。
-- 配置会同时写入系统安全存储和用户目录下权限受限的外部备份；系统安全存储偶发不可读时，脚本会自动使用备份，避免误报“未配置”。
+- 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录；它们由 `mimo.py` 保存到用户目录下权限受限的外部配置中。
+- 配置统一保存在用户目录下权限受限的单一文件 `credentials.json`（macOS/Linux 为 `~/.config/deepseek-vision/credentials.json`，Windows 为 `%APPDATA%\deepseek-vision\credentials.json`，均 600 权限）。
 - 如果 `status` 或 `check` 返回“尚未配置”，先运行 `python3 scripts/mimo.py status` 确认；确认确实未配置后再运行 `configure`，不要把已有配置覆盖掉。
 - 首次配置前，先向用户说明三种方式都可使用：
   - 按量付费：key 格式 `sk-xxxxx`，在控制台 API Keys 创建，Base URL 为 `https://api.xiaomimimo.com/v1`。
@@ -55,7 +55,7 @@ python3 scripts/mimo.py diagnose
 - 默认请求走 Python 标准库，API Key 不进入进程参数；若默认通道被服务商以 HTTP 403 拒绝（如 Cloudflare 指纹拦截），脚本会自动改用 curl 重试，无需手动干预；也可显式设置 `MIMO_USE_CURL=1` 强制走 curl，此时 key 通过临时配置文件传递，仍不会出现在命令行。
 - 所有 MiMo 请求默认直连，不经过终端或系统的 HTTP(S)_PROXY / ALL_PROXY 代理；即使 `MIMO_USE_CURL=1` 也会强制 `--noproxy '*'`。
 - 异步任务结果只在当前用户目录以 600 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理；worker 不再把媒体内容写入任何日志。
-- 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在系统安全存储和 `~/.config/deepseek-vision/credentials.json`（权限 600）。
+- 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在用户目录下权限受限的 `credentials.json`（macOS/Linux 为 `~/.config/deepseek-vision/`，Windows 为 `%APPDATA%\deepseek-vision\`，权限 600）。
 
 ## 处理非文本内容
 
@@ -133,7 +133,7 @@ python3 scripts/mimo.py poll --job <job_id> --wait 120
 
 ## 跨平台说明
 
-- macOS：优先使用 Keychain。
-- Windows：优先使用 DPAPI 加密凭据。
-- Linux/其他：回退到用户目录下权限受限的 JSON 配置。
+- macOS/Linux：`~/.config/deepseek-vision/credentials.json`（权限 600）。
+- Windows：`%APPDATA%\deepseek-vision\credentials.json`（ACL 限制仅当前用户）。
+- 所有平台统一使用文件后端，不再区分 Keychain/DPAPI。
 - 所有路径由 Python `pathlib`/环境变量计算，不依赖 POSIX 专属写法。

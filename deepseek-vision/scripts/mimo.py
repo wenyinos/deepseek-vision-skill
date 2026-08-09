@@ -148,10 +148,6 @@ def _job_path(job_id):
     return _jobs_dir() / f"{job_id}.json"
 
 
-def _use_file_backend():
-    return os.environ.get("MIMO_CREDENTIAL_BACKEND", "auto").strip().lower() == "file"
-
-
 def _secure_mkdir(path):
     path.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
@@ -212,157 +208,6 @@ def _restrict_windows_file(path):
         capture_output=True,
         text=True,
     )
-
-
-KEYCHAIN_SERVICE = "deepseek-vision"
-KEYCHAIN_CHUNK_PREFIX = "deepseek-vision.chunk."
-KEYCHAIN_CHUNK_SIZE = 100
-MAX_KEYCHAIN_CHUNKS = 100
-
-
-def _keychain_delete(account):
-    subprocess.run(
-        [
-            "security",
-            "delete-generic-password",
-            "-a",
-            account,
-            "-s",
-            KEYCHAIN_SERVICE,
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-
-def _keychain_read():
-    chunks = []
-    for index in range(MAX_KEYCHAIN_CHUNKS):
-        proc = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                f"{KEYCHAIN_CHUNK_PREFIX}{index}",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            break
-        value = proc.stdout.strip()
-        if not value:
-            break
-        chunks.append(value)
-    if chunks:
-        return "".join(chunks)
-    proc = subprocess.run(
-        [
-            "security",
-            "find-generic-password",
-            "-a",
-            "default",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-w",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    value = proc.stdout.strip()
-    return value or None
-
-
-def _keychain_write(payload):
-    try:
-        compact = json.dumps(json.loads(payload), ensure_ascii=False, separators=(",", ":"))
-    except (ValueError, TypeError):
-        compact = " ".join(payload.split())
-    chunks = [compact[index:index + KEYCHAIN_CHUNK_SIZE] for index in range(0, len(compact), KEYCHAIN_CHUNK_SIZE)]
-    _keychain_delete("default")
-    for index in range(MAX_KEYCHAIN_CHUNKS):
-        _keychain_delete(f"{KEYCHAIN_CHUNK_PREFIX}{index}")
-    for index, chunk in enumerate(chunks):
-        proc = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-U",
-                "-a",
-                f"{KEYCHAIN_CHUNK_PREFIX}{index}",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            input=f"{chunk}\n{chunk}\n",
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise MiMoError(
-                f"无法写入 macOS Keychain: {_sanitize_text(proc.stderr.strip())}",
-                code="keychain",
-            )
-
-
-def _dpapi_read():
-    secret = _config_dir() / "secret"
-    if not secret.exists():
-        return None
-    command = (
-        "$e = Get-Content -LiteralPath $env:MIMO_SECRET_FILE -Raw; "
-        "$s = $e | ConvertTo-SecureString; "
-        "$b = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); "
-        "try { [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } "
-        "finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }"
-    )
-    env = {**os.environ, "MIMO_SECRET_FILE": str(secret)}
-    proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if proc.returncode != 0:
-        raise MiMoError(
-            f"无法读取 Windows 凭据: {_sanitize_text(proc.stderr.strip())}",
-            code="dpapi",
-        )
-    value = proc.stdout.strip()
-    return value or None
-
-
-def _dpapi_write(payload):
-    secret = _config_dir() / "secret"
-    _secure_mkdir(_config_dir())
-    command = (
-        "$payload = [Console]::In.ReadToEnd(); "
-        "$s = ConvertTo-SecureString $payload -AsPlainText -Force; "
-        "$e = ConvertFrom-SecureString $s; "
-        "Set-Content -LiteralPath $env:MIMO_SECRET_FILE -Value $e -NoNewline"
-    )
-    env = {
-        **os.environ,
-        "MIMO_SECRET_FILE": str(secret),
-    }
-    env.pop("MIMO_CREDENTIALS_JSON", None)
-    proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-        input=payload,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if proc.returncode != 0:
-        raise MiMoError(
-            f"无法写入 Windows 凭据: {_sanitize_text(proc.stderr.strip())}",
-            code="dpapi",
-        )
 
 
 def _read_file():
@@ -523,24 +368,6 @@ def _job_command(job):
     return cmd
 
 
-def _load_raw_config():
-    if sys.platform == "darwin" and not _use_file_backend():
-        try:
-            value = _keychain_read()
-        except MiMoError:
-            value = None
-        if value:
-            return value
-    if os.name == "nt" and not _use_file_backend():
-        try:
-            value = _dpapi_read()
-        except MiMoError:
-            value = None
-        if value:
-            return value
-    return _read_file()
-
-
 def _decode_config_raw(raw):
     candidates = [raw]
     try:
@@ -568,25 +395,11 @@ def _merge_defaults(cfg):
 
 
 def load_config():
-    raw = _load_raw_config()
+    raw = _read_file()
     if not raw:
         cfg = _default_config()
     else:
-        try:
-            cfg = _decode_config_raw(raw)
-        except MiMoError:
-            fallback = _read_file()
-            if not fallback:
-                raise
-            cfg = _decode_config_raw(fallback)
-    file_raw = _read_file()
-    if file_raw:
-        try:
-            file_cfg = _decode_config_raw(file_raw)
-            if file_cfg.get("saved_at", 0) > cfg.get("saved_at", 0):
-                cfg = file_cfg
-        except MiMoError:
-            pass
+        cfg = _decode_config_raw(raw)
     return _merge_defaults(cfg)
 
 
@@ -594,16 +407,6 @@ def save_config(cfg):
     cfg["saved_at"] = time.time()
     payload = json.dumps(cfg, ensure_ascii=False, indent=2)
     with _config_lock():
-        if sys.platform == "darwin" and not _use_file_backend():
-            try:
-                _keychain_write(payload)
-            except MiMoError:
-                pass
-        if os.name == "nt" and not _use_file_backend():
-            try:
-                _dpapi_write(payload)
-            except MiMoError:
-                pass
         _write_file(payload)
 
 

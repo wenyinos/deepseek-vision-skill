@@ -36,10 +36,10 @@ python3 scripts/mimo.py jobs            # 列出后台任务（24h 后自动清�
 ### 命令分发
 argparse 子命令 → `main()` 内 handlers 字典 → 各 `cmd_*` 函数。`MiMoError`（带 `code`）在 `main()` 统一捕获，输出 `ok: false` + `code` 并以非零码退出。
 
-### 凭据存储（跨平台分层 + 双写备份）
-- macOS 用 Keychain（分块存储，每块 100 字符）、Windows 用 DPAPI、其他平台 `~/.config/deepseek-vision/credentials.json`（600 权限）
-- `save_config` 同时写系统安全存储和用户目录文件；`load_config` 读系统存储失败时回退文件，两份以 `saved_at` 较新者为准
-- 环境变量 `MIMO_API_KEY` / `MIMO_BASE_URL` 支持非交互配置；`MIMO_CREDENTIAL_BACKEND=file` 强制文件后端
+### 凭据存储（统一文件后端）
+- 所有平台统一写入用户目录下权限受限的单一文件：macOS/Linux `~/.config/deepseek-vision/credentials.json`、Windows `%APPDATA%\deepseek-vision\credentials.json`；macOS/Linux 权限 600，Windows 用 icacls 限制仅当前用户
+- `save_config` 原子写入（临时文件 + `os.replace`）；`load_config` 直接读文件，配置损坏时报错并提示重新 configure
+- 环境变量 `MIMO_API_KEY` / `MIMO_BASE_URL` 支持非交互配置
 - 安全红线：真实 key 与专属 Base URL 永不进入命令行参数或本仓库，状态/错误/请求体输出全部脱敏（key 只露首尾 4 位，Base64 媒体显示 `data:<media>;base64,***`）
 
 ### 请求与认证
