@@ -54,7 +54,7 @@ metadata:
 - 首次配置前，先向用户说明三种方式都可使用：
   - 按量付费：key 格式 `sk-xxxxx`，在控制台 API Keys 创建，Base URL 为 `https://api.xiaomimimo.com/v1`。
   - Token Plan：key 格式 `tp-xxxxx`，在 `https://platform.xiaomimimo.com/token-plan` 订阅，从 Token Plan 页面复制专属 API Key 和专属 Base URL。
-  - OpenCode Go：key 格式 `sk-xxxxx`，通过 OpenCode 的 Zen Go 端点接入，Base URL 为 `https://opencode.ai/zen/go/v1`。
+  - OpenCode Go：key 格式 `sk-xxxxx`，从 `https://opencode.ai/auth` 获取，通过 OpenCode 的 Zen Go 端点接入，Base URL 为 `https://opencode.ai/zen/go/v1`。
 
 ```bash
 python3 scripts/mimo.py configure --plan payg
@@ -73,7 +73,7 @@ python3 scripts/mimo.py diagnose
 - 默认请求走 Python 标准库，API Key 不进入进程参数；若默认通道被服务商以 HTTP 403 拒绝（如 Cloudflare 指纹拦截），脚本会自动改用 curl 重试，无需手动干预；也可显式设置 `MIMO_USE_CURL=1` 强制走 curl，此时 key 通过临时配置文件传递，仍不会出现在命令行。
 - 所有 MiMo 请求默认直连，不经过终端或系统的 HTTP(S)_PROXY / ALL_PROXY 代理；即使 `MIMO_USE_CURL=1` 也会强制 `--noproxy '*'`。
 - 异步任务结果只在当前用户目录以 600 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理；worker 不再把媒体内容写入任何日志。
-- 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在系统安全存储和 `~/.config/deepseek-vision/credentials.json`（权限 600）。
+- 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在系统安全存储和 `~/.config/deepseek-vision/credentials.json`（权限 600）；明文备份文件不能等同于系统级加密存储。
 
 ## 处理非文本内容
 

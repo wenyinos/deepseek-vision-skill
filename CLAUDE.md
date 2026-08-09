@@ -9,7 +9,7 @@ deepseek-vision 是一个多平台 skill（支持 Codex / Claude Code / OpenCode
 ## 目录结构
 
 - `deepseek-vision/SKILL.md` — 技能定义与运行时行为指令（agent 的调用/安全/错误处理约束）
-- `deepseek-vision/scripts/mimo.py` — 唯一实现，单文件 Python CLI，仅依赖标准库
+- `deepseek-vision/scripts/mimo.py` — 唯一实现，单文件 Python CLI，仅依赖标准库；m4a 转码需要 ffmpeg
 - `deepseek-vision/agents/openai.yaml` — Codex agent 元数据
 - `deepseek-vision/config.example.json` — 配置结构模板（active_plan + payg/token/opencode_go 凭据 + pricing 价格表）
 - `README.md` — 面向用户的安装/配置/使用文档
@@ -38,7 +38,7 @@ argparse 子命令 → `main()` 内 handlers 字典 → 各 `cmd_*` 函数。`Mi
 
 ### 凭据存储（跨平台分层 + 双写备份）
 - macOS 用 Keychain（分块存储，每块 100 字符）、Windows 用 DPAPI、其他平台 `~/.config/deepseek-vision/credentials.json`（600 权限）
-- `save_config` 同时写系统安全存储和用户目录文件；`load_config` 读系统存储失败时回退文件，两份以 `saved_at` 较新者为准
+- `save_config` 同时写系统安全存储和用户目录文件；`load_config` 读系统存储失败时回退文件，两份以 `saved_at` 较新者为准。注意用户目录文件是明文备份，不能等同于系统级加密存储
 - 环境变量 `MIMO_API_KEY` / `MIMO_BASE_URL` 支持非交互配置；`MIMO_CREDENTIAL_BACKEND=file` 强制文件后端
 - 安全红线：真实 key 与专属 Base URL 永不进入命令行参数或本仓库，状态/错误/请求体输出全部脱敏（key 只露首尾 4 位，Base64 媒体显示 `data:<media>;base64,***`）
 
