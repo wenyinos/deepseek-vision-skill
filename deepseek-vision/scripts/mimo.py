@@ -6,6 +6,7 @@ import base64
 import getpass
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -427,6 +428,19 @@ def active_credentials(cfg):
     return None
 
 
+def _audio_fallback_credentials(cfg):
+    """opencode_go 渠道不支持音频；若已配置官方渠道则自动回退，否则报错。返回 (plan, creds)。"""
+    for candidate in ("payg", "token"):
+        creds = _plan_credentials(cfg, candidate)
+        if creds.get("api_key") and (candidate != "token" or creds.get("base_url")):
+            return candidate, creds
+    raise MiMoError(
+        f"{OPENCODE_GO_LABEL} 渠道不支持音频处理，且当前未配置官方渠道（{PAYG_LABEL}/{TOKEN_LABEL}）；"
+        "请先运行 configure --plan payg 或 configure --plan token 配置官方 API Key 后自动回退",
+        code="audio_unsupported",
+    )
+
+
 def _env_credentials(plan):
     key = os.environ.get("MIMO_API_KEY", "").strip()
     url = os.environ.get("MIMO_BASE_URL", "").strip()
@@ -707,6 +721,10 @@ def _part_for_mime(mime, data, fps, resolution):
     if mime.startswith("image/"):
         return {"type": "image_url", "image_url": {"url": data}}
     if mime.startswith("audio/"):
+        if data.startswith("data:"):
+            encoded = data.split(",", 1)[1]
+            fmt = mime.split("/")[-1]
+            return {"type": "input_audio", "input_audio": {"data": encoded, "format": fmt}}
         return {"type": "input_audio", "input_audio": {"data": data}}
     if mime.startswith("video/"):
         return {
@@ -869,6 +887,12 @@ def _mask_media(value):
         parsed = urllib.parse.urlparse(value)
         if parsed.query:
             return urllib.parse.urlunparse(parsed._replace(query="***"))
+    if (
+        isinstance(value, str)
+        and len(value) > 256
+        and re.fullmatch(r"[A-Za-z0-9+/=]+", value)
+    ):
+        return "data:<media>;base64,***"
     return value
 
 
@@ -1252,6 +1276,9 @@ def cmd_analyze(args):
     if not parts:
         raise MiMoError("没有可处理的媒体内容", code="usage")
 
+    if any(p.get("type") == "input_audio" for p in parts) and plan == "opencode_go":
+        plan, creds = _audio_fallback_credentials(cfg)
+
     today = date.today().isoformat()
     system = (
         "You are MiMo, an AI assistant developed by Xiaomi. "
@@ -1316,11 +1343,6 @@ def cmd_asr(args):
     ext = path.suffix.lower().lstrip(".")
     if ext not in ("wav", "mp3"):
         raise MiMoError("ASR 仅支持 wav/mp3 音频", code="usage")
-    if active_plan(load_config()) == "opencode_go":
-        raise MiMoError(
-            "OpenCode Go 渠道不支持 ASR（mimo-v2.5-asr）；请先运行 use --plan payg 或 use --plan token 切换到支持 ASR 的渠道",
-            code="usage",
-        )
     timeout = _effective_timeout(args.timeout)
 
     if args.async_mode:
@@ -1379,6 +1401,8 @@ def cmd_asr(args):
     cfg = load_config()
     plan = active_plan(cfg)
     creds = active_credentials(cfg)
+    if plan == "opencode_go":
+        plan, creds = _audio_fallback_credentials(cfg)
     if args.dry_run:
         dry_plan = plan or os.environ.get("MIMO_PLAN", "payg")
         dry_creds = creds or {

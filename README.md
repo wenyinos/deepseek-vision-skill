@@ -32,7 +32,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 - API： 格式 `sk-xxxxx`。
 - Token Plan： 格式 `tp-xxxxx`。
-- OpenCode Go： 格式 `sk-xxxxx`，通过 OpenCode Zen Go 端点接入（仅支持图片/视频/音频理解，不支持 ASR 转文字）。
+- OpenCode Go： 格式 `sk-xxxxx`，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的 payg/token 官方渠道，未配置时会提示先配置官方渠道）。
 
 ## 使用
 

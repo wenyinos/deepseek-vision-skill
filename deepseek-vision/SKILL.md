@@ -83,8 +83,7 @@ python3 scripts/mimo.py analyze --url https://example.com/a.jpg 这张图里有�
 # 音频转文字/听写
 python3 scripts/mimo.py asr --file /path/to/audio.mp3 --language auto
 
-# 注意：OpenCode Go 渠道不支持 ASR（mimo-v2.5-asr），使用 asr 前需确认 active plan 为 payg 或 token（use --plan payg/token）；
-# OpenCode Go 渠道仍可用 analyze 处理音频理解（mimo-v2.5）。
+# 注意：OpenCode Go 渠道不支持音频处理（analyze 与 ASR 均不可用）；音频请求会自动回退到已配置的官方渠道（payg/token），未配置官方渠道时会报错提示先 configure --plan payg/token。
 
 # 不发送请求，只检查请求体（key 与 Base URL 会脱敏）
 python3 scripts/mimo.py analyze --files /path/to/file.png --prompt "测试" --dry-run
