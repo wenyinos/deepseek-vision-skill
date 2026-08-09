@@ -2,6 +2,7 @@
 """Cross-platform MiMo V2.5 helper for the deepseek-vision skill."""
 
 import argparse
+import atexit
 import base64
 import getpass
 import json
@@ -35,11 +36,13 @@ except ImportError:
 
 DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
 TOKEN_PLAN_EXAMPLE = "https://token-plan-cn.xiaomimimo.com/v1"
+OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_MODEL = "mimo-v2.5"
 ASR_MODEL = "mimo-v2.5-asr"
 BASE64_LIMIT = 50 * 1024 * 1024
 PAYG_LABEL = "按量付费"
 TOKEN_LABEL = "Token Plan"
+OPENCODE_GO_LABEL = "OpenCode Go"
 _SSL_CONTEXT = None
 DEFAULT_TIMEOUT = 180
 
@@ -116,6 +119,7 @@ def _default_config():
         "active_plan": "",
         "payg": {"api_key": "", "base_url": DEFAULT_BASE_URL},
         "token": {"api_key": "", "base_url": ""},
+        "opencode_go": {"api_key": "", "base_url": OPENCODE_GO_BASE_URL},
         "pricing": _default_pricing(),
         "pricing_updated": "2026-08-03",
     }
@@ -610,7 +614,7 @@ def _plan_credentials(cfg, plan):
 
 def active_plan(cfg):
     plan = cfg.get("active_plan") or ""
-    return plan if plan in ("payg", "token") else ""
+    return plan if plan in ("payg", "token", "opencode_go") else ""
 
 
 def active_credentials(cfg):
@@ -621,6 +625,19 @@ def active_credentials(cfg):
     return None
 
 
+def _audio_fallback_credentials(cfg):
+    """opencode_go 渠道不支持音频；若已配置官方渠道则自动回退，否则报错。返回 (plan, creds)。"""
+    for candidate in ("payg", "token"):
+        creds = _plan_credentials(cfg, candidate)
+        if creds.get("api_key") and (candidate != "token" or creds.get("base_url")):
+            return candidate, creds
+    raise MiMoError(
+        f"{OPENCODE_GO_LABEL} 渠道不支持音频处理，且当前未配置官方渠道（{PAYG_LABEL}/{TOKEN_LABEL}）；"
+        "请先运行 configure --plan payg 或 configure --plan token 配置官方 API Key 后自动回退",
+        code="audio_unsupported",
+    )
+
+
 def _env_credentials(plan):
     key = os.environ.get("MIMO_API_KEY", "").strip()
     url = os.environ.get("MIMO_BASE_URL", "").strip()
@@ -628,6 +645,8 @@ def _env_credentials(plan):
         return None
     if plan == "payg":
         url = url or DEFAULT_BASE_URL
+    if plan == "opencode_go":
+        url = url or OPENCODE_GO_BASE_URL
     if plan == "token" and not url:
         return None
     return {"api_key": key, "base_url": url}
@@ -641,8 +660,13 @@ def _choose_plan_interactively():
     print("请选择配置方式：", file=sys.stderr)
     print("1) 按量付费 API Key（sk-xxxxx）", file=sys.stderr)
     print("2) Token Plan（tp-xxxxx + 专属 Base URL）", file=sys.stderr)
-    choice = input("请输入 1 或 2: ").strip()
-    return {"1": "payg", "2": "token"}.get(choice)
+    print("3) OpenCode Go（sk-xxxxx）", file=sys.stderr)
+    choice = input("请输入 1/2/3: ").strip()
+    return {"1": "payg", "2": "token", "3": "opencode_go"}.get(choice)
+
+
+def _plan_label(plan):
+    return {"payg": PAYG_LABEL, "token": TOKEN_LABEL, "opencode_go": OPENCODE_GO_LABEL}.get(plan, plan)
 
 
 def _validate_prefix(plan, key):
@@ -671,6 +695,102 @@ def _write_curl_config(key, auth_header):
     return handle.name
 
 
+def _curl_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key", timeout=None):
+    timeout = _effective_timeout(timeout)
+    key = credentials.get("api_key", "")
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    curl = shutil.which("curl")
+    config_path = _write_curl_config(key, auth_header)
+    try:
+        cmd = [
+            curl,
+            "--config",
+            config_path,
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout),
+            "--connect-timeout",
+            "15",
+            "--write-out",
+            "\n%{http_code}",
+            "-X",
+            method,
+        ]
+        cmd += ["-H", "Content-Type: application/json"]
+        if data is not None:
+            cmd += ["--data-binary", "@-"]
+        cmd += ["--noproxy", "*"]
+        cmd.append(url)
+
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=data,
+                    capture_output=True,
+                    timeout=timeout + 5,
+                )
+            except subprocess.TimeoutExpired:
+                raise MiMoError(
+                    f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                    code="timeout",
+                )
+
+            output = proc.stdout.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode("utf-8", errors="replace")
+                raw_error = stderr or output
+                if "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
+                    raise MiMoError(
+                        f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
+                        code="timeout",
+                    )
+                message = (
+                    "网络错误: "
+                    + _sanitize_text(raw_error, [key, credentials.get("base_url", "")])
+                )
+                last_error = MiMoError(message, code="network")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            body = output
+            status = 0
+            if "\n" in output:
+                body, status_raw = output.rsplit("\n", 1)
+                try:
+                    status = int(status_raw.strip())
+                except ValueError:
+                    status = 0
+
+            if status >= 400:
+                message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code=status)
+                if status in (429, 500, 502, 503, 504) and attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+
+            try:
+                return json.loads(body), status or 200
+            except json.JSONDecodeError:
+                message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
+                last_error = MiMoError(message, code="parse")
+                if attempt < retries:
+                    time.sleep(1 + attempt)
+                    continue
+                raise last_error
+        raise last_error or MiMoError("请求失败", code="unknown")
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
 def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_header="api-key", timeout=None):
     timeout = _effective_timeout(timeout)
     key = credentials.get("api_key", "")
@@ -678,95 +798,7 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
     curl = shutil.which("curl")
     use_curl = curl and os.environ.get("MIMO_USE_CURL", "").strip().lower() in ("1", "true")
     if use_curl:
-        config_path = _write_curl_config(key, auth_header)
-        try:
-            cmd = [
-                curl,
-                "--config",
-                config_path,
-                "--silent",
-                "--show-error",
-                "--max-time",
-                str(timeout),
-                "--connect-timeout",
-                "15",
-                "--write-out",
-                "\n%{http_code}",
-                "-X",
-                method,
-            ]
-            cmd += ["-H", "Content-Type: application/json"]
-            if data is not None:
-                cmd += ["--data-binary", "@-"]
-            cmd += ["--noproxy", "*"]
-            cmd.append(url)
-
-            last_error = None
-            for attempt in range(retries + 1):
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        input=data,
-                        capture_output=True,
-                        timeout=timeout + 5,
-                    )
-                except subprocess.TimeoutExpired:
-                    raise MiMoError(
-                        f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
-                        code="timeout",
-                    )
-
-                output = proc.stdout.decode("utf-8", errors="replace")
-                if proc.returncode != 0:
-                    stderr = proc.stderr.decode("utf-8", errors="replace")
-                    raw_error = stderr or output
-                    if "timed out" in raw_error.lower() or "timeout" in raw_error.lower():
-                        raise MiMoError(
-                            f"请求超时（超过 {timeout} 秒），已停止；可提高超时（MIMO_TIMEOUT 或 --timeout）后重试",
-                            code="timeout",
-                        )
-                    message = (
-                        "网络错误: "
-                        + _sanitize_text(raw_error, [key, credentials.get("base_url", "")])
-                    )
-                    last_error = MiMoError(message, code="network")
-                    if attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-
-                body = output
-                status = 0
-                if "\n" in output:
-                    body, status_raw = output.rsplit("\n", 1)
-                    try:
-                        status = int(status_raw.strip())
-                    except ValueError:
-                        status = 0
-
-                if status >= 400:
-                    message = f"HTTP {status}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                    last_error = MiMoError(message, code=status)
-                    if status in (429, 500, 502, 503, 504) and attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-
-                try:
-                    return json.loads(body), status or 200
-                except json.JSONDecodeError:
-                    message = f"响应解析失败: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
-                    last_error = MiMoError(message, code="parse")
-                    if attempt < retries:
-                        time.sleep(1 + attempt)
-                        continue
-                    raise last_error
-            raise last_error or MiMoError("请求失败", code="unknown")
-        finally:
-            try:
-                os.unlink(config_path)
-            except OSError:
-                pass
+        return _curl_json(url, credentials, payload, method, retries, auth_header, timeout)
 
     headers = {"Content-Type": "application/json"}
     if auth_header == "api-key":
@@ -796,6 +828,12 @@ def _http_json(url, credentials, payload=None, method="POST", retries=2, auth_he
             body = exc.read().decode("utf-8", errors="replace")
             message = f"HTTP {exc.code}: {_sanitize_text(body, [key, credentials.get('base_url', '')])}"
             last_error = MiMoError(message, code=exc.code)
+            if exc.code == 403 and curl:
+                try:
+                    return _curl_json(url, credentials, payload, method, retries, auth_header, timeout)
+                except MiMoError as curl_exc:
+                    if curl_exc.code != 403:
+                        raise
             if exc.code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(1 + attempt)
                 continue
@@ -890,6 +928,40 @@ def _part_for_mime(mime, data, fps, resolution):
             "media_resolution": resolution,
         }
     raise MiMoError(f"未知媒体类型 {mime}")
+
+
+_TEMP_FILES = []
+
+
+def _cleanup_temp_files():
+    for path in _TEMP_FILES:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_temp_files)
+
+
+def _transcode_audio_to_mp3(path):
+    """m4a 在官方渠道 Base64 输入不兼容（实测 400），用 ffmpeg 转 mp3；返回临时文件路径，进程退出自动清理。"""
+    if not shutil.which("ffmpeg"):
+        raise MiMoError("检测到 m4a 音频官方渠道不兼容，需转码为 mp3，但未找到 ffmpeg", code="transcode")
+    fd, tmp = tempfile.mkstemp(suffix=".mp3", prefix="mimo-")
+    os.close(fd)
+    _TEMP_FILES.append(tmp)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(path), "-codec:a", "libmp3lame", "-q:a", "5", tmp],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise MiMoError(
+            f"音频转码失败(ffmpeg): {_sanitize_text(proc.stderr.strip())}",
+            code="transcode",
+        )
+    return tmp
 
 
 def _file_parts(paths, fps, resolution):
@@ -1065,7 +1137,7 @@ def cmd_configure(args):
     if not plan:
         if not _stdin_tty():
             raise MiMoError(
-                "请指定 --plan payg 或 --plan token；也可交互式运行 configure 选择",
+                "请指定 --plan payg、token 或 opencode_go；也可交互式运行 configure 选择",
                 code="usage",
             )
         plan = _choose_plan_interactively()
@@ -1074,6 +1146,8 @@ def cmd_configure(args):
 
     if plan == "payg":
         base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    elif plan == "opencode_go":
+        base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip() or OPENCODE_GO_BASE_URL
     else:
         base_url = args.base_url or os.environ.get("MIMO_BASE_URL", "").strip()
         if not base_url and _stdin_tty():
@@ -1090,7 +1164,7 @@ def cmd_configure(args):
 
     key = os.environ.get("MIMO_API_KEY", "").strip()
     if not key and _stdin_tty():
-        key = getpass.getpass(f"请输入 {TOKEN_LABEL if plan == 'token' else PAYG_LABEL} API Key（输入不回显）: ").strip()
+        key = getpass.getpass(f"请输入 {_plan_label(plan)} API Key（输入不回显）: ").strip()
     if not key:
         raise MiMoError(
             "未提供 API Key；请通过 MIMO_API_KEY 环境变量提供，或交互式运行 configure",
@@ -1123,10 +1197,10 @@ def cmd_use(args):
     missing = not creds.get("api_key") or (args.plan == "token" and not creds.get("base_url"))
     if missing:
         env_creds = _env_credentials(args.plan)
-        if env_creds and (args.plan == "payg" or env_creds.get("base_url")):
+        if env_creds and (args.plan != "token" or env_creds.get("base_url")):
             cfg[args.plan] = env_creds
         else:
-            label = TOKEN_LABEL if args.plan == "token" else PAYG_LABEL
+            label = _plan_label(args.plan)
             raise MiMoError(
                 f"{label} 尚未配置；请先运行 configure --plan {args.plan} 配置一次",
                 code="not_configured",
@@ -1159,6 +1233,7 @@ def cmd_status(args):
                 "active_plan": plan or None,
                 "payg_configured": bool(cfg.get("payg", {}).get("api_key")),
                 "token_configured": bool(cfg.get("token", {}).get("api_key")),
+                "opencode_go_configured": bool(cfg.get("opencode_go", {}).get("api_key")),
                 "active_key": _mask_value(creds.get("api_key", "")),
                 "active_base_url": _mask_url(creds.get("base_url", "")),
             },
@@ -1418,10 +1493,23 @@ def cmd_analyze(args):
         )
         return
 
+    if args.files:
+        prepared = []
+        for f in args.files:
+            p = Path(f)
+            if p.suffix.lower().lstrip(".") == "m4a":
+                prepared.append(_transcode_audio_to_mp3(p))
+            else:
+                prepared.append(f)
+        args.files = prepared
+
     parts = _file_parts(args.files, args.fps, args.resolution)
     parts.extend(_url_parts(args.urls, args.kind, args.fps, args.resolution))
     if not parts:
         raise MiMoError("没有可处理的媒体内容", code="usage")
+
+    if any(p.get("type") == "input_audio" for p in parts) and plan == "opencode_go":
+        plan, creds = _audio_fallback_credentials(cfg)
 
     today = date.today().isoformat()
     system = (
@@ -1545,6 +1633,8 @@ def cmd_asr(args):
     cfg = load_config()
     plan = active_plan(cfg)
     creds = active_credentials(cfg)
+    if plan == "opencode_go":
+        plan, creds = _audio_fallback_credentials(cfg)
     if args.dry_run:
         dry_plan = plan or os.environ.get("MIMO_PLAN", "payg")
         dry_creds = creds or {
@@ -1592,12 +1682,12 @@ def build_parser():
     parser = argparse.ArgumentParser(description="MiMo V2.5 helper for deepseek-vision")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    configure = subparsers.add_parser("configure", help="Configure pay-as-you-go or Token Plan")
-    configure.add_argument("--plan", choices=["payg", "token"], help="Plan to configure")
+    configure = subparsers.add_parser("configure", help="Configure pay-as-you-go, Token Plan or OpenCode Go")
+    configure.add_argument("--plan", choices=["payg", "token", "opencode_go"], help="Plan to configure")
     configure.add_argument("--base-url", help="Base URL (required for Token Plan)")
 
     use = subparsers.add_parser("use", help="Switch global active plan")
-    use.add_argument("--plan", required=True, choices=["payg", "token"])
+    use.add_argument("--plan", required=True, choices=["payg", "token", "opencode_go"])
 
     subparsers.add_parser("status", help="Show masked configuration status")
     subparsers.add_parser("check", help="Validate current credentials against MiMo API")
