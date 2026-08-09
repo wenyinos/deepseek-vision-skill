@@ -502,6 +502,8 @@ def _job_command(job):
             cmd += ["--files", file_path]
         for url in job.get("urls", []):
             cmd += ["--urls", url]
+        if job.get("plan"):
+            cmd += ["--plan", job["plan"]]
         if job.get("kind"):
             cmd += ["--kind", job["kind"]]
         if job.get("timeout"):
@@ -519,6 +521,8 @@ def _job_command(job):
         "--max-tokens",
         str(job.get("max_tokens", 2048)),
     ]
+    if job.get("plan"):
+        cmd += ["--plan", job["plan"]]
     if job.get("timeout"):
         cmd += ["--timeout", str(job["timeout"])]
     return cmd
@@ -619,18 +623,32 @@ def active_plan(cfg):
 
 def active_credentials(cfg):
     plan = active_plan(cfg)
+    return _credentials_for_plan(cfg, plan)
+
+
+def _credentials_for_plan(cfg, plan):
+    if plan not in ("payg", "token", "opencode_go"):
+        return None
     creds = _plan_credentials(cfg, plan)
     if creds.get("api_key") and (plan != "token" or creds.get("base_url")):
         return creds
     return None
 
 
+def _audio_fallback_candidates(cfg):
+    candidates = []
+    for candidate in ("payg", "token"):
+        creds = _credentials_for_plan(cfg, candidate)
+        if creds:
+            candidates.append((candidate, creds))
+    return candidates
+
+
 def _audio_fallback_credentials(cfg):
     """opencode_go 渠道不支持音频；若已配置官方渠道则自动回退，否则报错。返回 (plan, creds)。"""
-    for candidate in ("payg", "token"):
-        creds = _plan_credentials(cfg, candidate)
-        if creds.get("api_key") and (candidate != "token" or creds.get("base_url")):
-            return candidate, creds
+    candidates = _audio_fallback_candidates(cfg)
+    if candidates:
+        return candidates[0]
     raise MiMoError(
         f"{OPENCODE_GO_LABEL} 渠道不支持音频处理，且当前未配置官方渠道（{PAYG_LABEL}/{TOKEN_LABEL}）；"
         "请先运行 configure --plan payg 或 configure --plan token 配置官方 API Key 后自动回退",
@@ -951,11 +969,15 @@ def _transcode_audio_to_mp3(path):
     fd, tmp = tempfile.mkstemp(suffix=".mp3", prefix="mimo-")
     os.close(fd)
     _TEMP_FILES.append(tmp)
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(path), "-codec:a", "libmp3lame", "-q:a", "5", tmp],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path), "-codec:a", "libmp3lame", "-q:a", "5", tmp],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MiMoError("音频转码超时（超过 60 秒），请检查音频文件", code="transcode") from exc
     if proc.returncode != 0:
         raise MiMoError(
             f"音频转码失败(ffmpeg): {_sanitize_text(proc.stderr.strip())}",
@@ -1256,6 +1278,11 @@ def cmd_check(args):
             model_ids.append(str(item.get("id") or ""))
         elif isinstance(item, str):
             model_ids.append(item)
+    if not model_ids:
+        raise MiMoError(
+            "端点未返回可用模型；请检查 Base URL、API Key 和 plan 是否匹配",
+            code="no_models",
+        )
     has_v25 = DEFAULT_MODEL in model_ids
     has_asr = ASR_MODEL in model_ids
     print(
@@ -1308,8 +1335,12 @@ def cmd_diagnose(args):
                 model_ids.append(str(item.get("id") or ""))
             elif isinstance(item, str):
                 model_ids.append(item)
-        result["network_ok"] = True
-        result["models"] = sorted(set(model_ids))[:50]
+        if not model_ids:
+            result["network_ok"] = False
+            result["network_error"] = "端点未返回可用模型；请检查 Base URL、API Key 和 plan 是否匹配"
+        else:
+            result["network_ok"] = True
+            result["models"] = sorted(set(model_ids))[:50]
     except MiMoError as exc:
         result["network_ok"] = False
         result["network_error"] = str(exc)
@@ -1435,9 +1466,10 @@ def cmd_worker(args):
 
 def cmd_analyze(args):
     cfg = load_config()
-    plan = active_plan(cfg)
-    creds = active_credentials(cfg)
+    plan = args.plan or active_plan(cfg)
+    creds = _credentials_for_plan(cfg, plan)
     timeout = _effective_timeout(args.timeout)
+    fallback_attempts = []
 
     if args.media:
         if args.files or args.urls:
@@ -1469,6 +1501,7 @@ def cmd_analyze(args):
             "fps": args.fps,
             "resolution": args.resolution,
             "timeout": timeout,
+            "plan": plan,
         }
         _write_job_file(job)
         try:
@@ -1509,7 +1542,14 @@ def cmd_analyze(args):
         raise MiMoError("没有可处理的媒体内容", code="usage")
 
     if any(p.get("type") == "input_audio" for p in parts) and plan == "opencode_go":
-        plan, creds = _audio_fallback_credentials(cfg)
+        fallback_attempts = _audio_fallback_candidates(cfg)
+        if not fallback_attempts:
+            raise MiMoError(
+                f"{OPENCODE_GO_LABEL} 渠道不支持音频处理，且当前未配置官方渠道（{PAYG_LABEL}/{TOKEN_LABEL}）；"
+                "请先运行 configure --plan payg 或 configure --plan token 配置官方 API Key 后自动回退",
+                code="audio_unsupported",
+            )
+        plan, creds = fallback_attempts[0]
 
     today = date.today().isoformat()
     system = (
@@ -1536,10 +1576,22 @@ def cmd_analyze(args):
         _print_dry_run("analyze", dry_plan, dry_creds, body)
         return
 
-    if not creds:
-        raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
-
-    data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
+    if fallback_attempts:
+        last_error = None
+        for candidate, candidate_creds in fallback_attempts:
+            try:
+                data = _chat_with_retry(candidate_creds, body, args.max_tokens, timeout=timeout)
+                plan, creds = candidate, candidate_creds
+                break
+            except MiMoError as exc:
+                last_error = exc
+                continue
+        else:
+            raise last_error or MiMoError("音频回退渠道全部失败", code="audio_fallback_failed")
+    else:
+        if not creds:
+            raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
+        data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
     content, reasoning_fallback = _extract_content(data)
     finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
@@ -1576,6 +1628,10 @@ def cmd_asr(args):
     if ext not in ("wav", "mp3"):
         raise MiMoError("ASR 仅支持 wav/mp3 音频", code="usage")
     timeout = _effective_timeout(args.timeout)
+    cfg = load_config()
+    plan = args.plan or active_plan(cfg)
+    creds = _credentials_for_plan(cfg, plan)
+    fallback_attempts = []
 
     if args.async_mode:
         job = {
@@ -1587,6 +1643,7 @@ def cmd_asr(args):
             "language": args.language,
             "max_tokens": args.max_tokens,
             "timeout": timeout,
+            "plan": plan,
         }
         _write_job_file(job)
         try:
@@ -1630,11 +1687,15 @@ def cmd_asr(args):
         "stream": False,
     }
 
-    cfg = load_config()
-    plan = active_plan(cfg)
-    creds = active_credentials(cfg)
     if plan == "opencode_go":
-        plan, creds = _audio_fallback_credentials(cfg)
+        fallback_attempts = _audio_fallback_candidates(cfg)
+        if not fallback_attempts:
+            raise MiMoError(
+                f"{OPENCODE_GO_LABEL} 渠道不支持音频处理，且当前未配置官方渠道（{PAYG_LABEL}/{TOKEN_LABEL}）；"
+                "请先运行 configure --plan payg 或 configure --plan token 配置官方 API Key 后自动回退",
+                code="audio_unsupported",
+            )
+        plan, creds = fallback_attempts[0]
     if args.dry_run:
         dry_plan = plan or os.environ.get("MIMO_PLAN", "payg")
         dry_creds = creds or {
@@ -1644,10 +1705,22 @@ def cmd_asr(args):
         _print_dry_run("asr", dry_plan, dry_creds, body)
         return
 
-    if not creds:
-        raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
-
-    data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
+    if fallback_attempts:
+        last_error = None
+        for candidate, candidate_creds in fallback_attempts:
+            try:
+                data = _chat_with_retry(candidate_creds, body, args.max_tokens, timeout=timeout)
+                plan, creds = candidate, candidate_creds
+                break
+            except MiMoError as exc:
+                last_error = exc
+                continue
+        else:
+            raise last_error or MiMoError("音频回退渠道全部失败", code="audio_fallback_failed")
+    else:
+        if not creds:
+            raise MiMoError("尚未配置 active plan；请先运行 configure", code="not_configured")
+        data = _chat_with_retry(creds, body, args.max_tokens, timeout=timeout)
     content, reasoning_fallback = _extract_content(data)
     finish_reason = _finish_reason(data)
     usage = _extract_usage(data)
@@ -1702,6 +1775,7 @@ def build_parser():
     analyze.add_argument("--prompt", help="Question for MiMo")
     analyze.add_argument("--max-tokens", type=int, default=2048)
     analyze.add_argument("--timeout", type=int, help="Request timeout in seconds (default 180)")
+    analyze.add_argument("--plan", choices=["payg", "token", "opencode_go"], help=argparse.SUPPRESS)
     analyze.add_argument("--fps", type=float, default=2.0)
     analyze.add_argument("--resolution", default="default")
     analyze.add_argument("--dry-run", action="store_true")
@@ -1712,6 +1786,7 @@ def build_parser():
     asr.add_argument("--language", default="auto")
     asr.add_argument("--max-tokens", type=int, default=2048)
     asr.add_argument("--timeout", type=int, help="Request timeout in seconds (default 180)")
+    asr.add_argument("--plan", choices=["payg", "token", "opencode_go"], help=argparse.SUPPRESS)
     asr.add_argument("--dry-run", action="store_true")
     asr.add_argument("--async", dest="async_mode", action="store_true")
 
