@@ -311,6 +311,24 @@ def _keychain_write(payload):
             )
 
 
+def _ps_exe():
+    """优先使用 PowerShell 7 (pwsh)，不存在则回退 Windows PowerShell 5.1。"""
+    if os.name == "nt":
+        pwsh = shutil.which("pwsh") or ""
+        if not pwsh:
+            for pf in (
+                os.environ.get("ProgramFiles") or r"C:\Program Files",
+                os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)",
+            ):
+                cand = os.path.join(pf, "PowerShell", "7", "pwsh.exe")
+                if os.path.exists(cand):
+                    pwsh = cand
+                    break
+        if pwsh:
+            return pwsh
+    return "powershell.exe"
+
+
 def _dpapi_read():
     secret = _config_dir() / "secret"
     if not secret.exists():
@@ -324,7 +342,7 @@ def _dpapi_read():
     )
     env = {**os.environ, "MIMO_SECRET_FILE": str(secret)}
     proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        [_ps_exe(), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         env=env,
@@ -353,7 +371,7 @@ def _dpapi_write(payload):
     }
     env.pop("MIMO_CREDENTIALS_JSON", None)
     proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        [_ps_exe(), "-NoProfile", "-NonInteractive", "-Command", command],
         input=payload,
         capture_output=True,
         text=True,

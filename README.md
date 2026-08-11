@@ -21,8 +21,8 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 2  从 [Releases 页面](https://github.com/reF0o0/deepseek-vision-skill/releases) 下载 skill 压缩包，解压后把其中的 `deepseek-vision` 目录放到对应平台的 skill 目录：
 
    - Codex：`~/.codex/skills/deepseek-vision/`
-   - Claude Code：`~/.claude/skills/deepseek-vision/`
-   - OpenCode：`~/.config/opencode/skills/deepseek-vision/`
+   - Claude Code：`~/.claude/skills/deepseek-vision/`（或项目内 `.claude/skills/deepseek-vision/`）
+   - OpenCode：`~/.config/opencode/skills/deepseek-vision/`（或项目内 `.opencode/skills/deepseek-vision/`）
 
 ## 配置
 
@@ -30,9 +30,9 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 支持:
 
-- MiMo API： 格式 `sk-xxxxx`。
-- MiMo Token Plan： 格式 `tp-xxxxx`。
-- OpenCode Go：格式 `sk-xxxxx`，key 从 [opencode.ai/auth](https://opencode.ai/auth) 获取，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的官方渠道）。
+- MiMo API：格式 `sk-xxxxx`。
+- MiMo Token Plan：格式 `tp-xxxxx`。
+- OpenCode Go：格式 `sk-xxxxx`，key 从 [opencode.ai/auth](https://opencode.ai/auth) 获取，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的 payg/token 官方渠道，未配置时会提示先配置官方渠道）。
 
 ## 使用
 
@@ -47,6 +47,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 - 默认请求走 Python 标准库，API Key 和 Base URL 不进入进程参数；若默认通道被服务商以 HTTP 403 拒绝（如 Cloudflare 指纹拦截），脚本会自动改用 curl 重试，无需手动干预；也可显式设置 `MIMO_USE_CURL=1` 强制走 curl，此时 key 通过临时配置文件传递，仍不会出现在命令行。
 - 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录，也不写入仓库。
 - macOS 使用 Keychain 分块存储，Windows 使用 DPAPI，Linux/其他系统回退到 `600` 权限的用户目录配置；同时会保留一份 `600` 权限的明文备份文件，不能等同于系统级加密存储。
+- Windows 上 DPAPI 加密凭据优先使用 PowerShell 7（`pwsh`），未安装时自动回退系统自带的 Windows PowerShell 5.1；加密结果写入 `%APPDATA%\deepseek-vision\secret`，DPAPI 加密为主，`credentials.json` 明文备份仍保留。
 - 运行时会脱敏模型 Base64 和带参数的 URL；agent 不把媒体内容写入任何日志。
 - 异步任务结果只在当前用户目录以 `600` 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理。
 - 重要信息会脱敏，不泄露 key 或完整 Base URL。
