@@ -316,10 +316,14 @@ def _ps_exe():
     if os.name == "nt":
         pwsh = shutil.which("pwsh") or ""
         if not pwsh:
-            pf = os.environ.get("ProgramFiles") or r"C:\Program Files"
-            cand = os.path.join(pf, "PowerShell", "7", "pwsh.exe")
-            if os.path.exists(cand):
-                pwsh = cand
+            for pf in (
+                os.environ.get("ProgramFiles") or r"C:\Program Files",
+                os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)",
+            ):
+                cand = os.path.join(pf, "PowerShell", "7", "pwsh.exe")
+                if os.path.exists(cand):
+                    pwsh = cand
+                    break
         if pwsh:
             return pwsh
     return "powershell.exe"
