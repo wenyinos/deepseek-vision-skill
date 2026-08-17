@@ -75,6 +75,44 @@ python3 scripts/mimo.py diagnose
 - 异步任务结果只在当前用户目录以 600 权限暂存，`poll` 取走后立即删除，超过 24 小时自动清理；worker 不再把媒体内容写入任何日志。
 - 复制或分享本 skill 目录不会携带真实 key/Base URL，它们保存在系统安全存储和 `~/.config/deepseek-vision/credentials.json`（权限 600）；明文备份文件不能等同于系统级加密存储。
 
+## 各客户端图片输入（Codex / OpenCode / Claude Code）
+
+媒体识别统一走 MiMo；不同客户端「用户怎么把图片送进来」的机制不同。先运行 `client status` 看本机装了哪些客户端、各自配置是否正常，再按下表处理：
+
+| 客户端 | 用户粘贴图片后发生了什么 | 处理方式 | 需要重启 |
+|---|---|---|---|
+| Codex（DeepSeek 供应商） | 默认禁止粘贴；`~/.codex/models.json` 的 `input_modalities` 改为 `text/image/audio` 后放行，图片以本地文件进入对话 | `client enable --client codex` → 用户 Cmd+Q 重启 | 是 |
+| OpenCode 桌面版/TUI | 图片以 base64 file part 留在 `~/.local/share/opencode/opencode.db`，模型只收到占位 | `opencode-paste-extract` 提取落盘后 `analyze`；不改任何配置 | 否 |
+| Claude Code | 模型收到 `[Unsupported Image]` 占位，图片留在会话 jsonl 里 | `client enable --client claude` 装 hook，或 `claude-paste-extract` 提取落盘后 `analyze` | 否 |
+
+```bash
+python3 scripts/mimo.py client status
+python3 scripts/mimo.py client enable --client codex
+python3 scripts/mimo.py client enable --client claude
+python3 scripts/mimo.py client restore --client codex
+python3 scripts/mimo.py opencode-paste-extract            # 默认提取最新一张到 <cwd>/work/media
+python3 scripts/mimo.py opencode-paste-extract --all
+python3 scripts/mimo.py claude-paste-extract
+```
+
+Codex 注意事项（必读）：
+
+- `input_modalities` 只接受 `text`、`image`、`audio` 三种值；**绝不写入 `video`**。写入 `video` 会导致整个模型目录解析失败（`unknown variant "video", expected one of "text", "image", "audio"`），Codex 启动时回退内置 GPT 模型，表现为“模型变成 GPT、用不了”。
+- `client enable --client codex` 自带备份 + `codex debug models` 验证 + 失败自动回滚；重跑 DeepSeek 官方 setup 脚本后 models.json 会重置回 `["text"]`，需要重新 enable。
+- 出问题先 `client status` 看 `catalog_valid`，再用 `client restore --client codex` 恢复，不要删配置重跑脚本。
+
+OpenCode 注意事项：
+
+- 不要给 DeepSeek 声明 image 模态：OpenCode 会把图片字节编码进发给模型的请求，DeepSeek API 直接 400（`unknown variant "image_url", expected "text"`）。所以 OpenCode 端不做任何配置补丁。
+- 用户粘贴图片后正常发消息（模型会回复“不支持图片”等占位内容），再运行 `opencode-paste-extract` 取回原图，落盘后 `analyze`。
+
+Claude Code 注意事项：
+
+- 粘贴图片后模型提示“图片没有成功加载”或出现 `[Unsupported Image]` 是正常现象，不代表图片有问题。
+- 禁止用 Claude 原生 `Read` / 本地视觉能力读图；图片一律从会话 jsonl 提取（hook 或 `claude-paste-extract`）或让用户给路径，再走 MiMo。
+
+兜底方案（所有客户端通用）：让用户把图片/音频/视频存到 `work/media` 再发路径，直接 `analyze` / `asr`，不需要任何客户端配置；视频一律走文件路径 + `--fps`，不声明为输入类型。
+
 ## 处理非文本内容
 
 ```bash

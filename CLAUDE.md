@@ -27,6 +27,12 @@ python3 scripts/mimo.py asr --file <音频>                               # 音�
 python3 scripts/mimo.py analyze --files <媒体> --prompt "<问题>" --async # 后台排队，返回 job_id
 python3 scripts/mimo.py poll --job <job_id> --wait 120                 # 轮询取回后台结果
 python3 scripts/mimo.py jobs            # 列出后台任务（24h 后自动清理）
+python3 scripts/mimo.py client status                    # 检测三端安装/配置/运行状态
+python3 scripts/mimo.py client enable --client codex     # 放行 Codex 图片/音频粘贴（备份+验证+回滚）
+python3 scripts/mimo.py client enable --client claude    # 安装 Claude Code 粘贴 hook
+python3 scripts/mimo.py client restore --client codex    # 从备份恢复 Codex 模型目录
+python3 scripts/mimo.py opencode-paste-extract           # 从 OpenCode 会话库提取最近粘贴的图片
+python3 scripts/mimo.py claude-paste-extract             # 从 Claude 会话记录提取最近粘贴的图片
 ```
 
 所有命令输出 JSON，媒体处理结果在 `content` 字段。
@@ -53,8 +59,18 @@ argparse 子命令 → `main()` 内 handlers 字典 → 各 `cmd_*` 函数。`Mi
 ### 费用
 payg 模式按 `config.pricing` 中的人民币/百万 token 价格表计算 `cost_cny`；Token Plan 与 OpenCode Go 只返回 `tokens`。价格表随 `config.example.json` 提交，实际以用户本地 config 为准。
 
+### 客户端接入（Codex / OpenCode / Claude Code）
+
+- `client status` 只读检测三端：Codex 模型目录可解析性（用 `codex debug models` 验证）、OpenCode 的 server/auth/会话库、Claude 安装与 hook 状态，输出 JSON，不修改任何文件。
+- `client enable --client codex`：只改 slug 含 `deepseek` 的模型的 `input_modalities` 为 `text/image/audio`（集合比较，任意顺序都视为已启用）；改前备份 `models.json.bak-<时间戳>`，改后用 `codex debug models -c 'model_catalog_json="<路径>"'` 验证，失败自动回滚并报错。
+- 硬约束：`input_modalities` 只接受 `text` / `image` / `audio`，**绝不写 `video`**——写入 `video` 会导致整个目录解析失败（`unknown variant "video"`），Codex 启动时回退内置 GPT 模型目录。
+- OpenCode：不做任何配置补丁（DeepSeek API 拒收图片，400 `unknown variant "image_url"`）；`opencode-paste-extract` 从 `~/.local/share/opencode/opencode.db` 的 `part` 表读取 `type=file` + `mime=image/*` 的 base64 data URL，落盘 `<cwd>/work/media`，默认只取最新一张，`--all` 取全部。
+- Claude Code：`client enable --client claude` 写入 `~/.claude/hooks/deepseek-vision-save-paste.py` 并注册 `UserPromptSubmit` hook（解析会话 jsonl 中的 base64 image 块落盘）；`claude-paste-extract` 直接从 `~/.claude/projects/*/*.jsonl` 提取。两条路径都禁止用 Claude 原生 `Read` 读图。
+- 兜底：所有客户端都可把媒体放 `work/media` 发路径，走 `analyze` / `asr`；视频一律走文件路径 + `--fps`，不声明为输入类型。
+
 ## 注意事项
 
 - SKILL.md 是给 agent 的行为指令，与 mimo.py 逻辑强绑定（脱敏、超时、直连代理、异步任务），改动任一方需保持两处一致
 - 文件 Base64 后超过约 50MB 会被拒绝，需压缩/转码或改用公网 URL；`_data_uri` 只支持 png/jpg/gif/webp/bmp、mp3/wav/flac/m4a/ogg、mp4/mov/avi/wmv
 - 本仓库 `.gitignore` 排除了 `config.json`/`credentials.json`/`*.env`/`*.local`，真实凭据不得提交
+- 客户端接入命令的改动范围：Codex 只动 `~/.codex/models.json`（且仅 deepseek 模型），Claude Code 只动 `~/.claude/settings.json` 与 skill 自带 hook，OpenCode 只读会话库不写配置；重跑 DeepSeek 官方 setup 脚本会把 models.json 重置回 `["text"]`，需重新 enable

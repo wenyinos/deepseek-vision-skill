@@ -5,11 +5,14 @@ import argparse
 import atexit
 import base64
 import getpass
+import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -21,7 +24,7 @@ import urllib.parse
 import urllib.request
 import wave
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -1769,6 +1772,711 @@ def cmd_asr(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Client integration: Codex / OpenCode / Claude Code
+# ---------------------------------------------------------------------------
+
+CODX_BINARY_CANDIDATES = [
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+    "/Applications/OpenAI Codex.app/Contents/Resources/codex",
+]
+OPENCODE_DB_DEFAULT = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
+OPENCODE_AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+CLAUDE_HOOKS_DIR = Path.home() / ".claude" / "hooks"
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+CLAUDE_PASTE_HOOK_NAME = "deepseek-vision-save-paste.py"
+ALLOWED_CODX_MODALITIES = {"text", "image", "audio"}
+
+
+def _which_client(binary_name, candidates):
+    found = shutil.which(binary_name)
+    if found:
+        return found
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _codex_catalog_path():
+    config_toml = Path.home() / ".codex" / "config.toml"
+    if config_toml.is_file():
+        for line in config_toml.read_text(encoding="utf-8").splitlines():
+            match = re.match(r'\s*model_catalog_json\s*=\s*"([^"]+)"', line)
+            if match:
+                raw = match.group(1).strip()
+                if raw.startswith("~"):
+                    raw = str(Path.home()) + raw[1:]
+                return Path(raw).expanduser()
+    return Path.home() / ".codex" / "models.json"
+
+
+def _codex_debug_models(binary, catalog_path):
+    """Validate a model catalog exactly the way Codex parses it."""
+    if not binary:
+        return None, ""
+    cmd = [binary, "debug", "models", "-c", f'model_catalog_json="{catalog_path}"']
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as exc:
+        return False, _sanitize_text(str(exc))
+    if proc.returncode != 0:
+        return False, (proc.stderr.strip() or proc.stdout.strip())[:500]
+    try:
+        json.loads(proc.stdout)
+    except Exception:
+        return False, proc.stdout[:500]
+    return True, ""
+
+
+def _backup_file(path):
+    backup = path.with_name(f"{path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copyfile(path, backup)
+    return backup
+
+
+def _codex_backups(catalog_path=None):
+    path = catalog_path or _codex_catalog_path()
+    if not path.parent.is_dir():
+        return []
+    return sorted(
+        path.parent.glob(path.name + ".bak-*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _codex_models_info(catalog_path):
+    info = {"catalog": str(catalog_path), "exists": False, "models": [], "valid": None}
+    if not catalog_path.is_file():
+        return info
+    info["exists"] = True
+    try:
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        info["parse_error"] = _sanitize_text(str(exc))
+        return info
+    models = data.get("models", []) if isinstance(data, dict) else data
+    if isinstance(models, list):
+        info["models"] = [
+            {
+                "slug": str(m.get("slug", "")),
+                "input_modalities": m.get("input_modalities", []),
+            }
+            for m in models
+            if isinstance(m, dict)
+        ]
+    binary = _which_client("codex", CODX_BINARY_CANDIDATES)
+    info["binary"] = binary
+    if binary:
+        valid, err = _codex_debug_models(binary, catalog_path)
+        info["valid"] = valid
+        if err:
+            info["validation_error"] = err
+    return info
+
+
+def _client_detect_codex():
+    catalog = _codex_catalog_path()
+    info = _codex_models_info(catalog)
+    backups = _codex_backups(catalog)
+    result = {
+        "installed": True,
+        "binary": info.get("binary"),
+        "catalog": str(catalog),
+        "catalog_exists": info["exists"],
+        "catalog_valid": info.get("valid"),
+        "models": info["models"],
+        "backups": [str(b) for b in backups],
+    }
+    if "parse_error" in info:
+        result["catalog_parse_error"] = info["parse_error"]
+    if "validation_error" in info:
+        result["validation_error"] = info["validation_error"]
+    needs = [
+        m["slug"]
+        for m in info["models"]
+        if "deepseek" in m["slug"].lower()
+        and set(m.get("input_modalities") or []) != ALLOWED_CODX_MODALITIES
+    ]
+    result["needs_enable"] = needs
+    return result
+
+
+def _opencode_db():
+    return Path(os.environ.get("OPENCODE_DB", str(OPENCODE_DB_DEFAULT)))
+
+
+def _opencode_server_running():
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "OpenCode.app"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return None
+
+
+def _opencode_image_paste_parts(limit=5):
+    db = _opencode_db()
+    if not db.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT session_id, time_created, data FROM part ORDER BY time_created DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        return {"error": _sanitize_text(str(exc))}
+    parts = []
+    for session_id, ts, data in rows:
+        try:
+            obj = json.loads(data)
+        except Exception:
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("type") == "file"
+            and str(obj.get("mime", "")).startswith("image/")
+        ):
+            parts.append(
+                {
+                    "session_id": session_id,
+                    "time_created": ts,
+                    "mime": obj.get("mime"),
+                    "filename": obj.get("filename"),
+                    "stored_as": "base64_data_url"
+                    if str(obj.get("url", "")).startswith("data:image/")
+                    else "url",
+                }
+            )
+    return parts
+
+
+def _client_detect_opencode():
+    result = {
+        "installed": bool(OPENCODE_CONFIG_DIR.is_dir()),
+        "config_dir": str(OPENCODE_CONFIG_DIR),
+        "config_files": sorted(str(p) for p in OPENCODE_CONFIG_DIR.glob("opencode.json*")),
+        "auth_file": str(OPENCODE_AUTH),
+        "auth_configured": OPENCODE_AUTH.is_file(),
+        "db": str(_opencode_db()),
+        "db_exists": _opencode_db().is_file(),
+        "server_running": _opencode_server_running(),
+    }
+    auth_providers = []
+    if OPENCODE_AUTH.is_file():
+        try:
+            auth = json.loads(OPENCODE_AUTH.read_text(encoding="utf-8"))
+            auth_providers = list(auth.keys()) if isinstance(auth, dict) else []
+        except Exception:
+            auth_providers = []
+    result["auth_providers"] = auth_providers
+    result["recent_image_paste_parts"] = _opencode_image_paste_parts()
+    return result
+
+
+def _client_detect_claude():
+    binary = _which_client("claude", [])
+    result = {
+        "installed": bool(binary),
+        "binary": binary,
+        "settings": str(CLAUDE_SETTINGS),
+        "settings_exists": CLAUDE_SETTINGS.is_file(),
+        "hooks_dir": str(CLAUDE_HOOKS_DIR),
+        "hook_installed": (CLAUDE_HOOKS_DIR / CLAUDE_PASTE_HOOK_NAME).is_file(),
+        "projects_dir": str(CLAUDE_PROJECTS),
+        "projects_exists": CLAUDE_PROJECTS.is_dir(),
+    }
+    if CLAUDE_SETTINGS.is_file():
+        try:
+            settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+            hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+            result["user_prompt_submit_hooks"] = bool(hooks.get("UserPromptSubmit"))
+        except Exception as exc:
+            result["settings_parse_error"] = _sanitize_text(str(exc))
+    parent = CLAUDE_SETTINGS.parent
+    backups = (
+        sorted(
+            parent.glob("settings.json.bak-*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if parent.is_dir()
+        else []
+    )
+    result["settings_backups"] = [str(b) for b in backups]
+    return result
+
+
+def cmd_client_status(args):
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "client status",
+                "clients": {
+                    "codex": _client_detect_codex(),
+                    "opencode": _client_detect_opencode(),
+                    "claude": _client_detect_claude(),
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _client_enable_codex():
+    catalog = _codex_catalog_path()
+    if not catalog.is_file():
+        raise MiMoError(f"未找到 Codex 模型目录：{catalog}", code="codex_catalog_missing")
+    try:
+        data = json.loads(catalog.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise MiMoError(
+            f"Codex 模型目录解析失败：{_sanitize_text(str(exc))}",
+            code="codex_catalog_invalid",
+        )
+    models = data.get("models", []) if isinstance(data, dict) else data
+    if not isinstance(models, list):
+        raise MiMoError("Codex 模型目录结构异常：缺少 models 列表", code="codex_catalog_invalid")
+
+    changed = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        slug = str(model.get("slug", ""))
+        if "deepseek" not in slug.lower():
+            continue
+        old = model.get("input_modalities")
+        new = sorted(ALLOWED_CODX_MODALITIES)
+        if set(old or []) != ALLOWED_CODX_MODALITIES:
+            model["input_modalities"] = new
+            changed.append({"slug": slug, "from": old, "to": new})
+
+    if not changed:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "client enable",
+                    "client": "codex",
+                    "changed": [],
+                    "message": "已是 text/image/audio，无需修改",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
+    backup = _backup_file(catalog)
+    catalog.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    binary = _which_client("codex", CODX_BINARY_CANDIDATES)
+    valid, err = _codex_debug_models(binary, catalog)
+    if valid is False:
+        shutil.copyfile(backup, catalog)
+        raise MiMoError(
+            f"修改后 Codex 校验失败，已自动回滚到 {backup}：{err}",
+            code="codex_validation_failed",
+        )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "client enable",
+                "client": "codex",
+                "changed": changed,
+                "backup": str(backup),
+                "catalog_valid": valid,
+                "note": "请完全退出并重新打开 Codex（Cmd+Q）后生效",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _client_enable_claude():
+    script = r'''#!/usr/bin/env python3
+"""deepseek-vision: save pasted images from Claude Code UserPromptSubmit."""
+import base64
+import hashlib
+import json
+import os
+import sys
+
+
+def extract_images(transcript_path):
+    images = []
+    try:
+        with open(transcript_path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except Exception:
+        return images
+    for line in reversed(lines):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        message = obj.get("message", obj)
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image":
+                continue
+            source = part.get("source", {}) if isinstance(part.get("source"), dict) else {}
+            if source.get("type") == "base64" and source.get("data"):
+                images.append((source.get("media_type", "image/png"), source["data"]))
+        if images:
+            break
+    return images
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return
+    transcript = data.get("transcript_path") or ""
+    cwd = data.get("cwd") or os.path.expanduser("~")
+    for media_type, payload in extract_images(transcript):
+        out_dir = os.path.join(cwd, "work", "media")
+        os.makedirs(out_dir, exist_ok=True)
+        ext = media_type.split("/")[-1].replace("jpeg", "jpg")
+        try:
+            raw = base64.b64decode(payload)
+        except Exception:
+            continue
+        digest = hashlib.sha1(raw).hexdigest()[:8]
+        path = os.path.join(out_dir, f"claude-paste-{digest}.{ext}")
+        with open(path, "wb") as handle:
+            handle.write(raw)
+
+
+if __name__ == "__main__":
+    main()
+'''
+    CLAUDE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    hook_path = CLAUDE_HOOKS_DIR / CLAUDE_PASTE_HOOK_NAME
+    hook_path.write_text(script, encoding="utf-8")
+    hook_path.chmod(0o755)
+
+    settings_backup = None
+    if CLAUDE_SETTINGS.is_file():
+        settings_backup = _backup_file(CLAUDE_SETTINGS)
+    settings = {}
+    if CLAUDE_SETTINGS.is_file():
+        try:
+            settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise MiMoError(
+                f"~/.claude/settings.json 解析失败，未修改：{_sanitize_text(str(exc))}",
+                code="claude_settings_invalid",
+            )
+    if not isinstance(settings, dict):
+        settings = {}
+    hooks = settings.setdefault("hooks", {})
+    user_hooks = hooks.setdefault("UserPromptSubmit", [])
+    command = f"python3 {hook_path}"
+    if not any(
+        isinstance(item, dict)
+        and any(
+            isinstance(h, dict) and h.get("type") == "command" and h.get("command") == command
+            for h in item.get("hooks", [])
+        )
+        for item in user_hooks
+    ):
+        user_hooks.append({"hooks": [{"type": "command", "command": command}]})
+    CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    CLAUDE_SETTINGS.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "client enable",
+                "client": "claude",
+                "hook": str(hook_path),
+                "settings": str(CLAUDE_SETTINGS),
+                "settings_backup": str(settings_backup) if settings_backup else None,
+                "note": "hook 已安装；需在 Claude Code 会话中粘贴一次图片验证落盘",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_client_enable(args):
+    client = args.client
+    if client == "codex":
+        _client_enable_codex()
+    elif client == "claude":
+        _client_enable_claude()
+    elif client == "opencode":
+        status = _client_detect_opencode()
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "client enable",
+                    "client": "opencode",
+                    "changed": [],
+                    "message": (
+                        "OpenCode 无需修改任何配置：DeepSeek 是纯文本模型，"
+                        "声明 image 模态会让粘贴发送时被 DeepSeek API 拒绝(400)。"
+                        "粘贴后图片已留在 opencode.db，直接用 opencode-paste-extract 提取"
+                    ),
+                    "status": status,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        raise MiMoError(f"未知客户端：{client}，可选 codex/opencode/claude", code="usage")
+
+
+def cmd_client_restore(args):
+    client = args.client
+    if client == "codex":
+        catalog = _codex_catalog_path()
+        backups = _codex_backups(catalog)
+        if not backups:
+            raise MiMoError("没有找到 Codex 模型目录备份", code="no_backup")
+        chosen = Path(args.backup) if args.backup else backups[0]
+        if not chosen.is_file():
+            raise MiMoError(f"备份不存在：{chosen}", code="no_backup")
+        safety = _backup_file(catalog)
+        shutil.copyfile(chosen, catalog)
+        binary = _which_client("codex", CODX_BINARY_CANDIDATES)
+        valid, err = _codex_debug_models(binary, catalog)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "client restore",
+                    "client": "codex",
+                    "restored_from": str(chosen),
+                    "current_backed_up": str(safety),
+                    "catalog_valid": valid,
+                    "validation_error": err or None,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    elif client == "claude":
+        parent = CLAUDE_SETTINGS.parent
+        backups = (
+            sorted(
+                parent.glob("settings.json.bak-*"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if parent.is_dir()
+            else []
+        )
+        if not backups:
+            raise MiMoError("没有找到 Claude settings 备份", code="no_backup")
+        chosen = Path(args.backup) if args.backup else backups[0]
+        if not chosen.is_file():
+            raise MiMoError(f"备份不存在：{chosen}", code="no_backup")
+        CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(chosen, CLAUDE_SETTINGS)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "command": "client restore",
+                    "client": "claude",
+                    "restored_from": str(chosen),
+                    "settings": str(CLAUDE_SETTINGS),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        raise MiMoError(
+            "OpenCode 不需要也不应有配置补丁，没有可恢复的备份；可选 codex/claude",
+            code="usage",
+        )
+
+
+def _extract_image_parts(rows, out_dir, all_parts):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for session_id, ts, data in rows:
+        try:
+            obj = json.loads(data)
+        except Exception:
+            continue
+        if (
+            not isinstance(obj, dict)
+            or obj.get("type") != "file"
+            or not str(obj.get("mime", "")).startswith("image/")
+        ):
+            continue
+        url = obj.get("url", "") or ""
+        match = re.match(r"data:(image/[a-zA-Z0-9.+-]+);base64,(.*)", url, re.S)
+        if not match:
+            continue
+        try:
+            raw = base64.b64decode(match.group(2))
+        except Exception:
+            continue
+        ext = match.group(1).split("/")[-1].lower()
+        ext = {"jpeg": "jpg"}.get(ext, ext)
+        digest = hashlib.sha1(raw).hexdigest()[:8]
+        path = out_dir / f"opencode-paste-{session_id[:8]}-{digest}.{ext}"
+        path.write_bytes(raw)
+        saved.append(
+            {
+                "path": str(path),
+                "bytes": len(raw),
+                "session_id": session_id,
+                "time_created": ts,
+                "mime": obj.get("mime"),
+                "filename": obj.get("filename"),
+            }
+        )
+        if not all_parts:
+            break
+    return saved
+
+
+def cmd_opencode_paste_extract(args):
+    db = Path(args.db) if args.db else _opencode_db()
+    if not db.is_file():
+        raise MiMoError(
+            f"未找到 OpenCode 会话数据库：{db}；请先在 OpenCode 里粘贴一张图片",
+            code="opencode_db_missing",
+        )
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT session_id, time_created, data FROM part ORDER BY time_created DESC"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        raise MiMoError(
+            f"读取 OpenCode 会话数据库失败：{_sanitize_text(str(exc))}",
+            code="opencode_db_unreadable",
+        )
+    out_dir = args.out or str(Path.cwd() / "work" / "media")
+    saved = _extract_image_parts(rows, out_dir, args.all)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "opencode-paste-extract",
+                "db": str(db),
+                "out_dir": str(Path(out_dir)),
+                "saved": saved,
+                "count": len(saved),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _claude_transcript_images(transcript, all_parts):
+    out_dir = Path.cwd() / "work" / "media"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    try:
+        lines = transcript.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return saved
+    for line in reversed(lines):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        message = obj.get("message", obj)
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image":
+                continue
+            source = part.get("source", {}) if isinstance(part.get("source"), dict) else {}
+            if source.get("type") != "base64" or not source.get("data"):
+                continue
+            try:
+                raw = base64.b64decode(source["data"])
+            except Exception:
+                continue
+            media_type = source.get("media_type", "image/png")
+            ext = media_type.split("/")[-1].replace("jpeg", "jpg")
+            digest = hashlib.sha1(raw).hexdigest()[:8]
+            path = out_dir / f"claude-paste-{digest}.{ext}"
+            path.write_bytes(raw)
+            saved.append(
+                {
+                    "path": str(path),
+                    "bytes": len(raw),
+                    "transcript": str(transcript),
+                    "mime": media_type,
+                }
+            )
+            if not all_parts:
+                return saved
+    return saved
+
+
+def cmd_claude_paste_extract(args):
+    projects = Path(args.projects) if args.projects else CLAUDE_PROJECTS
+    if not projects.is_dir():
+        raise MiMoError(
+            f"未找到 Claude Code 会话目录：{projects}；请先在 Claude Code 里粘贴一张图片",
+            code="claude_projects_missing",
+        )
+    transcripts = sorted(
+        projects.glob("*/*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    saved = []
+    for transcript in transcripts:
+        saved.extend(_claude_transcript_images(transcript, args.all))
+        if saved and not args.all:
+            break
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "claude-paste-extract",
+                "projects_dir": str(projects),
+                "transcripts_scanned": len(transcripts),
+                "saved": saved,
+                "count": len(saved),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="MiMo V2.5 helper for deepseek-vision")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1815,6 +2523,30 @@ def build_parser():
     subparsers.add_parser("jobs", help="List pending and completed async jobs")
     subparsers.add_parser("worker", help="Internal background worker for async jobs")
 
+    client = subparsers.add_parser("client", help="Detect/enable/restore media input for Codex, OpenCode, Claude Code")
+    client_sub = client.add_subparsers(dest="client_sub", required=True)
+    client_sub.add_parser("status", help="Show per-client install/config/validation status")
+    client_enable = client_sub.add_parser("enable", help="Enable media input for a client")
+    client_enable.add_argument("--client", required=True, choices=["codex", "opencode", "claude"])
+    client_restore = client_sub.add_parser("restore", help="Restore a client config from backup")
+    client_restore.add_argument("--client", required=True, choices=["codex", "opencode", "claude"])
+    client_restore.add_argument("--backup", help="Specific backup file (default: newest)")
+
+    opencode_extract = subparsers.add_parser(
+        "opencode-paste-extract",
+        help="Extract the latest pasted image from the OpenCode session database",
+    )
+    opencode_extract.add_argument("--db", help="Path to opencode.db (default: ~/.local/share/opencode/opencode.db)")
+    opencode_extract.add_argument("--out", help="Output directory (default: <cwd>/work/media)")
+    opencode_extract.add_argument("--all", action="store_true", help="Extract every pasted image, not just the newest")
+
+    claude_extract = subparsers.add_parser(
+        "claude-paste-extract",
+        help="Extract pasted images from Claude Code session transcripts",
+    )
+    claude_extract.add_argument("--projects", help="Path to ~/.claude/projects")
+    claude_extract.add_argument("--all", action="store_true", help="Extract every pasted image, not just the newest")
+
     return parser
 
 
@@ -1832,8 +2564,17 @@ def main():
         "worker": cmd_worker,
         "analyze": cmd_analyze,
         "asr": cmd_asr,
+        "opencode-paste-extract": cmd_opencode_paste_extract,
+        "claude-paste-extract": cmd_claude_paste_extract,
     }
     handler = handlers.get(args.command)
+    if args.command == "client":
+        client_handlers = {
+            "status": cmd_client_status,
+            "enable": cmd_client_enable,
+            "restore": cmd_client_restore,
+        }
+        handler = client_handlers.get(args.client_sub)
     try:
         if handler:
             handler(args)
