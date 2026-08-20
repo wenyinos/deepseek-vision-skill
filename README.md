@@ -13,6 +13,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 - 全局配置：全局配置一次，任意对话、新开任务、重启后都能继续使用。
 - 多对话可用：MiMo 返回内容只在当前对话使用，不跨对话共享，可多对话同时使用。
 - 后台任务：识别较久时会进入后台，对话被中断后结果仍可取回。
+- 客户端接入：支持三端图片输入（Codex / OpenCode / Claude Code），检测、放行、提取由 agent 自动处理。
 
 ## 安装
 
@@ -37,6 +38,23 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 ## 使用
 
 在对话里直接发送图片、音频、视频并提问即可。
+
+## 客户端图片输入（Codex / OpenCode / Claude Code）
+
+媒体识别统一走 MiMo；不同客户端「用户怎么把图片送进来」的机制不同，由 agent 自动处理，无需手动运行命令：
+
+| 客户端 | 用户粘贴图片后发生了什么 | 处理方式 | 需要重启 |
+|---|---|---|---|
+| Codex（DeepSeek 供应商） | 默认禁止粘贴；放行后图片以本地文件进入对话 | agent 自动放行并提示重启一次 | 是 |
+| OpenCode 桌面版/TUI | 图片留在本地会话库，模型只收到占位 | agent 自动取回图片识别；不改任何配置 | 否 |
+| Claude Code | 模型收到 `[Unsupported Image]` 占位，图片留在会话记录里 | agent 自动从会话记录提取识别 | 否 |
+
+注意：
+
+- Codex：`input_modalities` 只接受 `text/image/audio`，绝不写 `video`（会导致启动解析失败回退 GPT）；重跑 DeepSeek setup 脚本后需要重新放行。
+- OpenCode：给 DeepSeek 声明 image 模态会被 API 400 拒绝，因此不改任何配置。
+- Claude Code：粘贴后出现 `[Unsupported Image]` 是正常现象；不使用原生视觉能力读图。
+- 兜底：所有客户端都可把媒体放 `work/media` 发路径；视频走路径 + `--fps`。
 
 ## 超时与失败
 
