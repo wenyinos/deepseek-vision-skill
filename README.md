@@ -9,7 +9,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 - 视频理解：按帧理解视频内容并总结。
 - 分工明确：文本部分由 agent 自己处理，媒体部分交给 MiMo，不把整个大文档塞给 MiMo。
 - 强制路由：图片和截图不会走本地 OCR 或原生视觉，统一交给 MiMo 处理。
-- 用量透明：使用 Token Plan 与 OpenCode Go 会显示使用 token 数，使用 API 会显示使用人民币金额。
+- 用量透明：使用 Token Plan、OpenCode Go 与 OpenCode Zen 会显示使用 token 数，使用 API 会显示使用人民币金额。
 - 全局配置：全局配置一次，任意对话、新开任务、重启后都能继续使用。
 - 多对话可用：MiMo 返回内容只在当前对话使用，不跨对话共享，可多对话同时使用。
 - 后台任务：识别较久时会进入后台，对话被中断后结果仍可取回。
@@ -34,6 +34,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 - MiMo API：格式 `sk-xxxxx`。
 - MiMo Token Plan：格式 `tp-xxxxx`。
 - OpenCode Go：格式 `sk-xxxxx`，key 从 [opencode.ai/auth](https://opencode.ai/auth) 获取，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的 payg/token 官方渠道，未配置时会提示先配置官方渠道）。
+- OpenCode Zen：**无需 API Key（匿名可用）**，接入 `https://opencode.ai/zen/v1`，固定使用免费模型 `mimo-v2.5-free`，**仅支持图片**（免费节点可能不稳定，失败可重试或改用其他方案；有 IP 限制，每 5 小时约可调用 200 次）；音频请求自动回退官方渠道（payg/token），视频请求先回退 OpenCode Go（已配置时）再回退官方渠道，均未配置时提示先配置。
 
 ## 使用
 
@@ -74,7 +75,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 
 - 已安装 [Codex](https://openai.com/zh-Hans-CN/codex/)、[Claude Code](https://code.claude.com/docs/en/setup) 或 [OpenCode](https://opencode.ai/docs/)（任一即可）。
 - 已安装 [Python](https://www.python.org/downloads/)
-- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile) 并配置 API Key 或 Token Plan，或获取 [OpenCode Go](https://opencode.ai/docs/go/) 渠道的 API Key。
+- 已注册 [小米 MiMo 开放平台](https://platform.xiaomimimo.com/console/profile) 并配置 API Key 或 Token Plan，或获取 [OpenCode Go](https://opencode.ai/docs/go/) 渠道的 API Key；OpenCode Zen 渠道无需任何注册与 Key，可直接使用。
 
 ## 注意事项
 

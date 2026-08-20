@@ -11,3 +11,4 @@ credentials.json
 *.env
 *.local
 .claude/
+.qoder/

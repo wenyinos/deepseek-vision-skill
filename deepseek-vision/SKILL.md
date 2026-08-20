@@ -51,21 +51,23 @@ metadata:
 - 真实 API Key 和 Token Plan 专属 Base URL 不写入本 skill 目录；它们由 `mimo.py` 保存到系统安全存储或用户目录下的外部配置中。
 - 配置会同时写入系统安全存储和用户目录下权限受限的外部备份；系统安全存储偶发不可读时，脚本会自动使用备份，避免误报“未配置”。
 - 如果 `status` 或 `check` 返回“尚未配置”，先运行 `python3 scripts/mimo.py status` 确认；确认确实未配置后再运行 `configure`，不要把已有配置覆盖掉。
-- 首次配置前，先向用户说明三种方式都可使用：
+- 首次配置前，先向用户说明四种方式都可使用：
   - 按量付费：key 格式 `sk-xxxxx`，在控制台 API Keys 创建，Base URL 为 `https://api.xiaomimimo.com/v1`。
   - Token Plan：key 格式 `tp-xxxxx`，在 `https://platform.xiaomimimo.com/token-plan` 订阅，从 Token Plan 页面复制专属 API Key 和专属 Base URL。
   - OpenCode Go：key 格式 `sk-xxxxx`，从 `https://opencode.ai/auth` 获取，通过 OpenCode 的 Zen Go 端点接入，Base URL 为 `https://opencode.ai/zen/go/v1`。
+  - OpenCode Zen：**无需 API Key（匿名可用）**，接入 `https://opencode.ai/zen/v1`，固定使用免费模型 `mimo-v2.5-free`，**仅支持图片**（免费节点可能不稳定，失败可重试或改用其他方案；有 IP 限制，每 5 小时约可调用 200 次）；`configure --plan zen` 时 API Key 直接回车跳过即可。
 
 ```bash
 python3 scripts/mimo.py configure --plan payg
 python3 scripts/mimo.py configure --plan token --base-url "https://你的专属TokenPlan地址/v1"
 python3 scripts/mimo.py configure --plan opencode_go
+python3 scripts/mimo.py configure --plan zen
 python3 scripts/mimo.py status
 python3 scripts/mimo.py check
 python3 scripts/mimo.py diagnose
 ```
 
-用户说“切换到 Token Plan / 改用 Token Plan”时运行 `python3 scripts/mimo.py use --plan token`；说“切换到 API Key / 改用按量付费”时运行 `python3 scripts/mimo.py use --plan payg`；说“切换到 OpenCode Go / 改用 OpenCode Go”时运行 `python3 scripts/mimo.py use --plan opencode_go`；说“查看当前配置”时运行 `status`。切换后立即全局生效。
+用户说“切换到 Token Plan / 改用 Token Plan”时运行 `python3 scripts/mimo.py use --plan token`；说“切换到 API Key / 改用按量付费”时运行 `python3 scripts/mimo.py use --plan payg`；说“切换到 OpenCode Go / 改用 OpenCode Go”时运行 `python3 scripts/mimo.py use --plan opencode_go`；说“切换到 OpenCode Zen / 改用 Zen / 用免费模型”时运行 `python3 scripts/mimo.py use --plan zen`；说“查看当前配置”时运行 `status`。切换后立即全局生效。
 
 安全与隐私：
 
@@ -127,6 +129,7 @@ python3 scripts/mimo.py analyze --url https://example.com/a.jpg 这张图里有�
 python3 scripts/mimo.py asr --file /path/to/audio.mp3 --language auto
 
 # 注意：OpenCode Go 渠道不支持音频处理（analyze 与 ASR 均不可用）；音频请求会自动回退到已配置的官方渠道（payg/token），未配置官方渠道时会报错提示先 configure --plan payg/token。
+# 注意：OpenCode Zen 渠道仅支持图片；音频请求自动回退官方渠道（payg/token）；视频请求先回退 OpenCode Go（已配置时），再回退官方渠道，两者都未配置时报错提示先 configure。mimo-v2.5-free 为免费节点，可能不稳定（有 IP 限制，每 5 小时约 200 次），失败可重试。
 # 注意：m4a 音频在官方渠道 Base64 输入不兼容（官方端点限制，实测 400），脚本会自动用 ffmpeg 转码为 mp3 后处理；本机需安装 ffmpeg。
 
 # 不发送请求，只检查请求体（key 与 Base URL 会脱敏）
@@ -174,8 +177,9 @@ python3 scripts/mimo.py poll --job <job_id> --wait 120
 - Token Plan：`已通过 MiMo V2.5 处理 · Token Plan · 本次约 N tokens`
 - 按量付费：`已通过 MiMo V2.5 处理 · 按量付费 · 本次约 ¥0.xxxx`
 - OpenCode Go：`已通过 MiMo V2.5 处理 · OpenCode Go · 本次约 N tokens`
+- OpenCode Zen：`已通过 MiMo V2.5 处理 · OpenCode Zen（mimo-v2.5-free）· 本次约 N tokens`
 
-按量付费金额来自脚本返回的 `cost_cny`；Token Plan 与 OpenCode Go 的 token 数来自 `tokens`。如果 `cost_cny` 为 null，说明无法精确计价，应注明“金额以官方账单为准”。
+按量付费金额来自脚本返回的 `cost_cny`；Token Plan、OpenCode Go 与 OpenCode Zen 的 token 数来自 `tokens`。如果 `cost_cny` 为 null，说明无法精确计价，应注明“金额以官方账单为准”。
 
 ## 错误处理
 
