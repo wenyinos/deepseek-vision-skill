@@ -1665,7 +1665,7 @@ def cmd_analyze(args):
         "command": "analyze",
         "mimo_used": True,
         "content": content,
-        "model": DEFAULT_MODEL,
+        "model": ZEN_MODEL if plan == "zen" else DEFAULT_MODEL,
         "plan": plan,
         "usage": usage,
         "finish_reason": finish_reason,
