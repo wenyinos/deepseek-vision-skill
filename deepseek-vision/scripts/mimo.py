@@ -694,8 +694,6 @@ def _env_credentials(plan):
         url = url or DEFAULT_BASE_URL
     if plan == "opencode_go":
         url = url or OPENCODE_GO_BASE_URL
-    if plan == "zen":
-        url = url or ZEN_BASE_URL
     if plan == "token" and not url:
         return None
     return {"api_key": key, "base_url": url}
@@ -710,7 +708,7 @@ def _choose_plan_interactively():
     print("1) 按量付费 API Key（sk-xxxxx）", file=sys.stderr)
     print("2) Token Plan（tp-xxxxx + 专属 Base URL）", file=sys.stderr)
     print("3) OpenCode Go（sk-xxxxx）", file=sys.stderr)
-    print("4) OpenCode Zen（sk-xxxxx，免费模型 mimo-v2.5-free，仅图片）", file=sys.stderr)
+    print("4) OpenCode Zen（匿名可用，免费模型 mimo-v2.5-free，仅图片）", file=sys.stderr)
     choice = input("请输入 1/2/3/4: ").strip()
     return {"1": "payg", "2": "token", "3": "opencode_go", "4": "zen"}.get(choice)
 

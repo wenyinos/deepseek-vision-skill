@@ -34,7 +34,7 @@ deepseek-vision 是一个多平台 skill，让本身没有视觉能力的模型�
 - MiMo API：格式 `sk-xxxxx`。
 - MiMo Token Plan：格式 `tp-xxxxx`。
 - OpenCode Go：格式 `sk-xxxxx`，key 从 [opencode.ai/auth](https://opencode.ai/auth) 获取，通过 OpenCode Zen Go 端点接入（仅支持图片/视频理解，不支持音频 analyze 与 ASR；音频请求会自动回退到已配置的 payg/token 官方渠道，未配置时会提示先配置官方渠道）。
-- OpenCode Zen：**无需 API Key（匿名可用）**，接入 `https://opencode.ai/zen/v1`，固定使用免费模型 `mimo-v2.5-free`，**仅支持图片**（免费节点可能不稳定，失败可重试或改用其他方案；有 IP 限制，每 5 小时约可调用 200 次）；音频请求自动回退官方渠道（payg/token），视频请求先回退 OpenCode Go（已配置时）再回退官方渠道，均未配置时提示先配置。
+- OpenCode Zen：**无需 API Key（匿名可用）**，接入 `https://opencode.ai/zen/v1`，固定使用免费模型 `mimo-v2.5-free`，**仅支持图片**（免费节点可能不稳定，失败可重试或改用其他方案；有 IP 限制，每 5 小时约可调用 200 次）；音频请求自动回退官方渠道（payg/token），视频请求先尝试 OpenCode Go（已配置时）、失败后继续回退官方渠道（payg/token），均不可用时提示先配置。
 
 ## 使用
 

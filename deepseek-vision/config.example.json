@@ -12,6 +12,10 @@
     "api_key": "",
     "base_url": "https://opencode.ai/zen/go/v1"
   },
+  "zen": {
+    "api_key": "",
+    "base_url": "https://opencode.ai/zen/v1"
+  },
   "pricing": {
     "mimo-v2.5": {
       "input_uncached_cny_per_mtok": 1.0,

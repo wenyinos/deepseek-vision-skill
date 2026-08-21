@@ -11,7 +11,7 @@ deepseek-vision 是一个多平台 skill（支持 Codex / Claude Code / OpenCode
 - `deepseek-vision/SKILL.md` — 技能定义与运行时行为指令（agent 的调用/安全/错误处理约束）
 - `deepseek-vision/scripts/mimo.py` — 唯一实现，单文件 Python CLI，仅依赖标准库；m4a 转码需要 ffmpeg
 - `deepseek-vision/agents/openai.yaml` — Codex agent 元数据
-- `deepseek-vision/config.example.json` — 配置结构模板（active_plan + payg/token/opencode_go 凭据 + pricing 价格表）
+- `deepseek-vision/config.example.json` — 配置结构模板（active_plan + payg/token/opencode_go/zen 凭据 + pricing 价格表）
 - `README.md` — 面向用户的安装/配置/使用文档
 
 ## 常用命令
